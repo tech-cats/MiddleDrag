@@ -80,6 +80,17 @@ public final class MultitouchManager: @unchecked Sendable {
     // Core components
     private let gestureRecognizer = GestureRecognizer()
     private let mouseGenerator = MouseEventGenerator()
+    private struct TapClick {
+        let button: GestureMouseButton
+        let position: CGPoint?
+        let enabled: Bool
+        let deduplicate: Bool
+    }
+    // Accessed only on gestureQueue, alongside the recognizer's pending tap.
+    private var pendingTapClick: TapClick?
+    private let gestureEpochLock = NSLock()
+    private var gestureEpoch: UInt64 = 0
+
     private var deviceMonitor: TouchDeviceProviding?
 
     // Factory for creating device monitors (injectable for testing)
@@ -155,6 +166,7 @@ public final class MultitouchManager: @unchecked Sendable {
     ) {
         self.deviceProviderFactory = deviceProviderFactory ?? { unsafe DeviceMonitor() }
         gestureRecognizer.delegate = self
+        gestureRecognizer.timerQueue = gestureQueue
 
         // Set up event tap factory after self is available
         if let customSetup = eventTapSetup {
@@ -516,7 +528,7 @@ public final class MultitouchManager: @unchecked Sendable {
     /// Internal stop without removing sleep/wake observers
     private func internalStop() {
         mouseGenerator.cancelDrag()
-        gestureRecognizer.reset()
+        resetGestureProcessing()
 
         // Reset gesture state flags
         isActivelyDragging = false
@@ -590,7 +602,7 @@ public final class MultitouchManager: @unchecked Sendable {
 
         if !isEnabled {
             mouseGenerator.cancelDrag()
-            gestureRecognizer.reset()
+            resetGestureProcessing()
             currentFingerCount = 0  // Reset finger count when disabled
             lastGestureWasActive = false
             gestureEndTime = 0
@@ -598,15 +610,32 @@ public final class MultitouchManager: @unchecked Sendable {
         }
     }
 
+    /// Invalidate queued frames and discard delayed clicks/holds on lifecycle changes.
+    private func resetGestureProcessing() {
+        gestureEpochLock.withLock { gestureEpoch &+= 1 }
+        gestureQueue.async { [weak self] in
+            guard let self else { return }
+            self.gestureRecognizer.reset()
+            self.pendingTapClick = nil
+            self.shouldPassThroughCurrentGesture = false
+            self.mouseGenerator.cancelDrag()
+        }
+    }
+
     /// Update configuration
     public func updateConfiguration(_ config: GestureConfiguration) {
         configuration = config
+        // Changes cancel any active session before adopting a new button mapping.
+        resetGestureProcessing()
+        isActivelyDragging = false
+        isInThreeFingerGesture = false
+        lastGestureWasActive = false
         applyConfiguration()
     }
     
-    /// Force release any stuck middle-drag state
+    /// Force release any stuck mouse-button drag state
     /// This can be called manually by the user (e.g., from menu bar) if they notice
-    /// the middle button is stuck. It sends a MIDDLE_UP event regardless of current state.
+    /// a button is stuck. It releases the session's button regardless of current state.
     func forceReleaseStuckDrag() {
         // Dispatch to main thread to avoid data races with gesture state updates
         // which are also dispatched to main thread (see GestureRecognizerDelegate methods)
@@ -621,12 +650,12 @@ public final class MultitouchManager: @unchecked Sendable {
             self.gestureEndTime = CACurrentMediaTime()
             self.lastGestureWasActive = false
             
-            // Force send MIDDLE_UP unconditionally
+            // Force release the selected button unconditionally
             // Unlike cancelDrag(), this always sends UP even if internal state is already false
-            self.mouseGenerator.forceMiddleMouseUp()
+            self.mouseGenerator.forceMouseUp()
             
             // Also reset the gesture recognizer to ensure clean state
-            self.gestureRecognizer.reset()
+            self.resetGestureProcessing()
         }
     }
 
@@ -729,7 +758,7 @@ public final class MultitouchManager: @unchecked Sendable {
         let now = CACurrentMediaTime()
         let timeSinceGestureEnd = now - gestureEndTime
 
-        // Allow our own middle mouse events through
+        // Allow our own synthetic events through, for every configured button
         let isMiddleButton = buttonNumber == 2
         let isLeftButton = buttonNumber == 0
 
@@ -765,11 +794,11 @@ public final class MultitouchManager: @unchecked Sendable {
         // are only set when a valid gesture actually starts (respecting modifier keys)
         let gestureActive = modifierKeyHeld && (isInThreeFingerGesture || isActivelyDragging)
 
-        if isMiddleButton && isOurEvent {
+        if isOurEvent {
             return unsafe Unmanaged.passUnretained(event)
         }
 
-        // Force click support: convert left clicks to middle clicks when 3+ fingers are on trackpad
+        // Force click support: convert physical three-finger clicks to the tap button
         // This works based on raw finger count, not gesture activation state, so force clicks
         // work even when gestures are cancelled (e.g., modifier key not held)
         // However, don't perform force clicks during an active drag to avoid interference
@@ -778,10 +807,10 @@ public final class MultitouchManager: @unchecked Sendable {
         if hasThreeOrMoreFingers && isLeftButton && !isOurEvent && !isActivelyDragging && !shouldPassThroughCurrentGesture {
             // Check event type - we want to handle both down and up
             if type == .leftMouseDown || type == .leftMouseUp {
-                // Perform middle click instead
+                // Perform a click using the configured tap button
                 if type == .leftMouseDown {
                     lastForceClickTime = CACurrentMediaTime()
-                    mouseGenerator.performClick()
+                    mouseGenerator.performClick(button: configuration.tapButton)
                 }
                 // Suppress the original left click
                 return nil
@@ -802,7 +831,10 @@ public final class MultitouchManager: @unchecked Sendable {
     // MARK: - Private Methods
 
     private func applyConfiguration() {
-        gestureRecognizer.configuration = configuration
+        let config = configuration
+        gestureQueue.async { [weak self] in
+            self?.gestureRecognizer.configuration = config
+        }
         mouseGenerator.smoothingFactor = configuration.smoothingFactor
         mouseGenerator.minimumMovementThreshold = CGFloat(configuration.minimumMovementThreshold)
     }
@@ -868,17 +900,20 @@ extension MultitouchManager: DeviceMonitorDelegate {
             touchData = nil
         }
 
+        let epoch = gestureEpochLock.withLock { gestureEpoch }
         gestureQueue.async { [weak self] in
+            guard let self, self.isEnabled,
+                  self.gestureEpochLock.withLock({ self.gestureEpoch == epoch }) else { return }
             if let data = touchData {
                 unsafe data.withUnsafeBytes { rawBuffer in
                     guard let baseAddress = rawBuffer.baseAddress else { return }
                     let buffer = unsafe UnsafeMutableRawPointer(mutating: baseAddress)
-                    unsafe self?.gestureRecognizer.processTouches(
+                    unsafe self.gestureRecognizer.processTouches(
                         buffer, count: touchCount, timestamp: timestamp, modifierFlags: modifierFlags)
                 }
             } else {
                 // Zero touches — still notify so gesture recognizer can end via stableFrameCount
-                unsafe self?.gestureRecognizer.processTouches(
+                unsafe self.gestureRecognizer.processTouches(
                     UnsafeMutableRawPointer(bitPattern: 1)!,
                     count: 0,
                     timestamp: timestamp,
@@ -903,6 +938,8 @@ extension MultitouchManager: GestureRecognizerDelegate {
         if shouldSkipGestureForTitleBar() {
             Log.debug("gestureRecognizerDidStart: Title bar detected - passing through to system", category: .gesture)
             shouldPassThroughCurrentGesture = true
+            recognizer.discardTapToDragSequence()
+            pendingTapClick = nil
             // Don't set isInThreeFingerGesture - let system handle the gesture
             return
         }
@@ -914,11 +951,12 @@ extension MultitouchManager: GestureRecognizerDelegate {
         }
     }
 
-    func gestureRecognizerDidTap(_ recognizer: GestureRecognizer) {
+    func gestureRecognizerShouldAcceptTap(_ recognizer: GestureRecognizer) -> Bool {
+        guard isEnabled else { return false }
         // Skip if this gesture is being passed through to system (e.g., title bar drag)
         if shouldPassThroughCurrentGesture {
             shouldPassThroughCurrentGesture = false
-            return
+            return false
         }
         
         // Skip if a force-click (physical trackpad click with 3 fingers) recently
@@ -936,18 +974,18 @@ extension MultitouchManager: GestureRecognizerDelegate {
                 self?.gestureEndTime = CACurrentMediaTime()
                 self?.lastGestureWasActive = true  // Force click was active
             }
-            return
+            return false
         }
         
-        // Check if tap to click is enabled
-        guard configuration.tapToClickEnabled else {
+        // A silent tap may still arm tap-to-drag when tap clicks are disabled
+        guard configuration.tapToClickEnabled || configuration.tapToDragEnabled else {
             // Reset state even if tap is disabled
             DispatchQueue.main.async { [weak self] in
                 self?.isInThreeFingerGesture = false
                 self?.gestureEndTime = CACurrentMediaTime()
                 self?.lastGestureWasActive = false  // Tap was disabled, so not active
             }
-            return
+            return false
         }
 
         // Check if cursor is over desktop when ignoreDesktop is enabled
@@ -962,7 +1000,7 @@ extension MultitouchManager: GestureRecognizerDelegate {
                 self?.gestureEndTime = CACurrentMediaTime()
                 self?.lastGestureWasActive = false
             }
-            return
+            return false
         }
 
         // Check window size filter before performing tap
@@ -1000,19 +1038,41 @@ extension MultitouchManager: GestureRecognizerDelegate {
         // This handles edge cases where a drag might have been started but not properly ended
         mouseGenerator.cancelDrag()
 
-        // Only perform the click if window meets size requirements
+        // Capture the click target now, before a possible tap-to-drag delay
         if shouldPerformTap {
-            mouseGenerator.performClick()
+            pendingTapClick = TapClick(
+                button: configuration.tapButton,
+                position: configuration.tapToDragEnabled ? MouseEventGenerator.currentMouseLocation : nil,
+                enabled: configuration.tapToClickEnabled,
+                deduplicate: !configuration.tapToDragEnabled
+            )
+        }
+        return shouldPerformTap
+    }
+
+    func gestureRecognizerDidTap(_ recognizer: GestureRecognizer) {
+        guard isEnabled else { return }
+        // Direct callers (including legacy delegate clients) can still commit a tap.
+        if pendingTapClick == nil && !gestureRecognizerShouldAcceptTap(recognizer) { return }
+        guard let click = pendingTapClick else { return }
+        pendingTapClick = nil
+        if click.enabled {
+            mouseGenerator.performClick(button: click.button, at: click.position,
+                                        deduplicate: click.deduplicate)
         }
     }
 
     func gestureRecognizerDidBeginDragging(_ recognizer: GestureRecognizer) {
+        pendingTapClick = nil
+        guard isEnabled else { return }
         // Skip if this gesture is being passed through to system (e.g., title bar drag)
         if shouldPassThroughCurrentGesture {
             return  // Don't reset flag here - will be reset when gesture ends
         }
         
-        guard configuration.middleDragEnabled else {
+        let dragEnabled = recognizer.isTapToDragContact
+            ? configuration.tapToDragEnabled : configuration.middleDragEnabled
+        guard dragEnabled else {
             // Reset state even if drag is disabled
             DispatchQueue.main.async { [weak self] in
                 self?.isInThreeFingerGesture = false
@@ -1073,14 +1133,19 @@ extension MultitouchManager: GestureRecognizerDelegate {
         }
 
         let mouseLocation = MouseEventGenerator.currentMouseLocation
-        mouseGenerator.startDrag(at: mouseLocation)
+        let button = recognizer.isTapToDragContact
+            ? configuration.tapToDragButton : configuration.directDragButton
+        mouseGenerator.startDrag(at: mouseLocation, button: button,
+                                 allowStationaryHold: recognizer.isTapToDragContact)
     }
 
     func gestureRecognizerDidUpdateDragging(_ recognizer: GestureRecognizer, with data: GestureData)
     {
         // Skip if this gesture is being passed through to system
         guard !shouldPassThroughCurrentGesture else { return }
-        guard configuration.middleDragEnabled else { return }
+        let dragEnabled = recognizer.isTapToDragContact
+            ? configuration.tapToDragEnabled : configuration.middleDragEnabled
+        guard dragEnabled else { return }
         let delta = data.frameDelta(from: configuration)
 
         guard delta.x != 0 || delta.y != 0 else { return }
@@ -1116,6 +1181,7 @@ extension MultitouchManager: GestureRecognizerDelegate {
     }
 
     func gestureRecognizerDidCancel(_ recognizer: GestureRecognizer) {
+        pendingTapClick = nil
         // Cancel from early state (e.g., possibleTap) - reset state
         shouldPassThroughCurrentGesture = false
         DispatchQueue.main.async { [weak self] in
@@ -1126,6 +1192,7 @@ extension MultitouchManager: GestureRecognizerDelegate {
     }
 
     func gestureRecognizerDidCancelDragging(_ recognizer: GestureRecognizer) {
+        pendingTapClick = nil
         // Cancel drag immediately - user added 4th finger for Mission Control
         shouldPassThroughCurrentGesture = false
         DispatchQueue.main.async { [weak self] in

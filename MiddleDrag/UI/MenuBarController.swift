@@ -26,6 +26,7 @@ public class MenuBarController: NSObject {
         case launchAtLogin = 2
         case middleDrag = 3
         case tapToClick = 4
+        case tapToDrag = 5
     }
 
     // MARK: - Initialization
@@ -115,6 +116,7 @@ public class MenuBarController: NSObject {
         menu.addItem(createEnabledItem())
         menu.addItem(createTapToClickItem())
         menu.addItem(createMiddleDragItem())
+        menu.addItem(createTapToDragItem())
         menu.addItem(NSMenuItem.separator())
 
         // Settings
@@ -162,25 +164,73 @@ public class MenuBarController: NSObject {
         return item
     }
 
-    private func createMiddleDragItem() -> NSMenuItem {
-        let item = NSMenuItem(title: "Drag", action: #selector(toggleMiddleDrag), keyEquivalent: "")
-        item.target = self
-        let isMainEnabled = multitouchManager?.isEnabled ?? false
-        // Only show checkmark and enable if main toggle is on
-        item.isEnabled = isMainEnabled
-        item.state = (isMainEnabled && preferences.middleDragEnabled) ? .on : .off
-        item.tag = MenuItemTag.middleDrag.rawValue
+    private enum GestureChoice: Int { case tap, directDrag, tapToDrag }
+    private struct ButtonSelection {
+        let gesture: GestureChoice
+        let button: GestureMouseButton
+    }
+
+    private func createGestureMenu(title: String, gesture: GestureChoice,
+                                   enabled: Bool, button: GestureMouseButton,
+                                   action: Selector, tag: MenuItemTag) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.tag = tag.rawValue
+        item.state = enabled ? .on : .off
+        let submenu = NSMenu()
+        let toggle = createMenuItem(title: "Enabled", action: action)
+        toggle.state = enabled ? .on : .off
+        submenu.addItem(toggle)
+        submenu.addItem(.separator())
+        for candidate in GestureMouseButton.allCases {
+            let choice = createMenuItem(title: "\(candidate.displayName) Button",
+                                        action: #selector(setGestureButton(_:)))
+            choice.representedObject = ButtonSelection(gesture: gesture, button: candidate)
+            choice.state = candidate == button ? .on : .off
+            submenu.addItem(choice)
+        }
+        item.submenu = submenu
         return item
     }
 
+    private func createMiddleDragItem() -> NSMenuItem {
+        createGestureMenu(title: "Direct Drag", gesture: .directDrag,
+                          enabled: preferences.middleDragEnabled,
+                          button: preferences.directDragButton,
+                          action: #selector(toggleMiddleDrag), tag: .middleDrag)
+    }
+
     private func createTapToClickItem() -> NSMenuItem {
-        let item = NSMenuItem(
-            title: "Tap to Click", action: #selector(toggleTapToClick), keyEquivalent: "")
-        item.target = self
-        let isMainEnabled = multitouchManager?.isEnabled ?? false
-        item.isEnabled = isMainEnabled
-        item.state = (isMainEnabled && preferences.tapToClickEnabled) ? .on : .off
-        item.tag = MenuItemTag.tapToClick.rawValue
+        createGestureMenu(title: "Tap to Click", gesture: .tap,
+                          enabled: preferences.tapToClickEnabled,
+                          button: preferences.tapButton,
+                          action: #selector(toggleTapToClick), tag: .tapToClick)
+    }
+
+    private func createTapToDragItem() -> NSMenuItem {
+        let item = createGestureMenu(title: "Tap to Drag", gesture: .tapToDrag,
+                                     enabled: preferences.tapToDragEnabled,
+                                     button: preferences.tapToDragButton,
+                                     action: #selector(toggleTapToDrag), tag: .tapToDrag)
+        item.submenu?.addItem(.separator())
+        let timeout = NSMenuItem(
+            title: "Timeout (\(Int((preferences.tapToDragTimeout * 1000).rounded())) ms)",
+            action: nil, keyEquivalent: "")
+        let choices = NSMenu()
+        for milliseconds in [100, 150, 200, 250, 300, 500, 1000] {
+            let choice = createMenuItem(title: "\(milliseconds) ms",
+                                        action: #selector(setTapToDragTimeout(_:)))
+            choice.representedObject = Double(milliseconds) / 1000
+            choice.state = abs(preferences.tapToDragTimeout * 1000 - Double(milliseconds)) < 0.5 ? .on : .off
+            choices.addItem(choice)
+        }
+        choices.addItem(.separator())
+        choices.addItem(createMenuItem(title: "Custom…", action: #selector(setCustomTapToDragTimeout)))
+        timeout.submenu = choices
+        item.submenu?.addItem(timeout)
+        let explanation = NSMenuItem(title: "Tap clicks wait while Tap to Drag is enabled",
+                                      action: nil, keyEquivalent: "")
+        explanation.isEnabled = false
+        item.submenu?.addItem(explanation)
         return item
     }
 
@@ -504,32 +554,72 @@ public class MenuBarController: NSObject {
         buildMenu()  // Rebuild to update status text
     }
 
-    @objc func toggleMiddleDrag() {
-        preferences.middleDragEnabled.toggle()
-
+    private func applyGesturePreferences() {
         var config = multitouchManager?.configuration ?? GestureConfiguration()
         config.middleDragEnabled = preferences.middleDragEnabled
+        config.tapToClickEnabled = preferences.tapToClickEnabled
+        config.tapButton = preferences.tapButton
+        config.directDragButton = preferences.directDragButton
+        config.tapToDragEnabled = preferences.tapToDragEnabled
+        config.tapToDragButton = preferences.tapToDragButton
+        config.tapToDragTimeout = preferences.tapToDragTimeout
         multitouchManager?.updateConfiguration(config)
-
-        if let item = statusItem.menu?.item(withTag: MenuItemTag.middleDrag.rawValue) {
-            item.state = preferences.middleDragEnabled ? .on : .off
-        }
-
+        buildMenu()
         NotificationCenter.default.post(name: .preferencesChanged, object: preferences)
+    }
+
+    @objc func toggleMiddleDrag() {
+        preferences.middleDragEnabled.toggle()
+        applyGesturePreferences()
     }
 
     @objc func toggleTapToClick() {
         preferences.tapToClickEnabled.toggle()
+        applyGesturePreferences()
+    }
 
-        var config = multitouchManager?.configuration ?? GestureConfiguration()
-        config.tapToClickEnabled = preferences.tapToClickEnabled
-        multitouchManager?.updateConfiguration(config)
+    @objc func toggleTapToDrag() {
+        preferences.tapToDragEnabled.toggle()
+        applyGesturePreferences()
+    }
 
-        if let item = statusItem.menu?.item(withTag: MenuItemTag.tapToClick.rawValue) {
-            item.state = preferences.tapToClickEnabled ? .on : .off
+    @objc private func setGestureButton(_ sender: NSMenuItem) {
+        guard let selection = sender.representedObject as? ButtonSelection else { return }
+        switch selection.gesture {
+        case .tap: preferences.tapButton = selection.button
+        case .directDrag: preferences.directDragButton = selection.button
+        case .tapToDrag: preferences.tapToDragButton = selection.button
         }
+        applyGesturePreferences()
+    }
 
-        NotificationCenter.default.post(name: .preferencesChanged, object: preferences)
+    @objc private func setTapToDragTimeout(_ sender: NSMenuItem) {
+        guard let seconds = sender.representedObject as? Double else { return }
+        preferences.tapToDragTimeout = seconds
+        applyGesturePreferences()
+    }
+
+    @objc private func setCustomTapToDragTimeout() {
+        let alert = NSAlert()
+        alert.messageText = "Tap to Drag Timeout"
+        alert.informativeText = "Time from releasing a three-finger tap to the next three-finger contact (1–60000 milliseconds)."
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+        let input = NSTextField(string: String(Int((preferences.tapToDragTimeout * 1000).rounded())))
+        input.frame = NSRect(x: 0, y: 0, width: 200, height: 24)
+        alert.accessoryView = input
+        alert.window.initialFirstResponder = input
+        NSApp.activate(ignoringOtherApps: true)
+        while alert.runModal() == .alertFirstButtonReturn {
+            guard let milliseconds = Double(input.stringValue), milliseconds.isFinite,
+                  milliseconds >= 1, milliseconds <= 60000 else {
+                alert.informativeText = "Enter a number between 1 and 60000 milliseconds."
+                continue
+            }
+            preferences.tapToDragTimeout = milliseconds / 1000
+            applyGesturePreferences()
+            return
+        }
     }
 
     @objc func setSensitivity(_ sender: NSMenuItem) {

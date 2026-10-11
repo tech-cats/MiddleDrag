@@ -21,6 +21,42 @@ enum GestureState: Sendable {
     }
 }
 
+/// Mouse buttons available for each three-finger gesture.
+enum GestureMouseButton: String, Codable, CaseIterable, Sendable {
+    case left, middle, right
+
+    var displayName: String { rawValue.capitalized }
+    var quartzButton: CGMouseButton {
+        switch self {
+        case .left: return .left
+        case .middle: return .center
+        case .right: return .right
+        }
+    }
+    var buttonNumber: Int64 { Int64(quartzButton.rawValue) }
+    var downEvent: CGEventType {
+        switch self {
+        case .left: return .leftMouseDown
+        case .middle: return .otherMouseDown
+        case .right: return .rightMouseDown
+        }
+    }
+    var dragEvent: CGEventType {
+        switch self {
+        case .left: return .leftMouseDragged
+        case .middle: return .otherMouseDragged
+        case .right: return .rightMouseDragged
+        }
+    }
+    var upEvent: CGEventType {
+        switch self {
+        case .left: return .leftMouseUp
+        case .middle: return .otherMouseUp
+        case .right: return .rightMouseUp
+        }
+    }
+}
+
 // MARK: - Configuration
 
 /// Configuration for gesture detection and mouse behavior
@@ -44,6 +80,11 @@ public struct GestureConfiguration: Sendable {
     // Feature toggles
     var middleDragEnabled: Bool = true  // Allow disabling drag while keeping tap
     var tapToClickEnabled: Bool = true  // Allow disabling tap while keeping drag
+    var tapButton: GestureMouseButton = .middle
+    var directDragButton: GestureMouseButton = .middle
+    var tapToDragEnabled: Bool = false
+    var tapToDragButton: GestureMouseButton = .middle
+    var tapToDragTimeout: Double = 0.2  // Release to next three-finger contact
 
     // Velocity scaling
     var enableVelocityBoost: Bool = true
@@ -217,6 +258,11 @@ public struct UserPreferences: Codable, Sendable {
     var blockSystemGestures: Bool = false
     var middleDragEnabled: Bool = true  // Allow disabling drag while keeping tap
     var tapToClickEnabled: Bool = true  // Allow disabling tap while keeping drag
+    var tapButton: GestureMouseButton = .middle
+    var directDragButton: GestureMouseButton = .middle
+    var tapToDragEnabled: Bool = false
+    var tapToDragButton: GestureMouseButton = .middle
+    var tapToDragTimeout: Double = 0.2  // Release to next three-finger contact
 
     // Palm rejection - Exclusion zone
     var exclusionZoneEnabled: Bool = false
@@ -266,6 +312,11 @@ public struct UserPreferences: Codable, Sendable {
             blockSystemGestures: blockSystemGestures,
             middleDragEnabled: middleDragEnabled,
             tapToClickEnabled: tapToClickEnabled,
+            tapButton: tapButton,
+            directDragButton: directDragButton,
+            tapToDragEnabled: tapToDragEnabled,
+            tapToDragButton: tapToDragButton,
+            tapToDragTimeout: tapToDragTimeout,
             exclusionZoneEnabled: exclusionZoneEnabled,
             exclusionZoneSize: Float(exclusionZoneSize),
             requireModifierKey: requireModifierKey,

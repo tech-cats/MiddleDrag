@@ -18,6 +18,11 @@ public final class PreferencesManager: @unchecked Sendable {
         static let blockSystemGestures = "blockSystemGestures"
         static let middleDragEnabled = "middleDragEnabled"
         static let tapToClickEnabled = "tapToClickEnabled"
+        static let tapButton = "tapButton"
+        static let directDragButton = "directDragButton"
+        static let tapToDragEnabled = "tapToDragEnabled"
+        static let tapToDragButton = "tapToDragButton"
+        static let tapToDragTimeout = "tapToDragTimeout"
         // Palm rejection keys
         static let exclusionZoneEnabled = "exclusionZoneEnabled"
         static let exclusionZoneSize = "exclusionZoneSize"
@@ -67,6 +72,11 @@ public final class PreferencesManager: @unchecked Sendable {
             Keys.blockSystemGestures: false,
             Keys.middleDragEnabled: true,
             Keys.tapToClickEnabled: true,
+            Keys.tapButton: GestureMouseButton.middle.rawValue,
+            Keys.directDragButton: GestureMouseButton.middle.rawValue,
+            Keys.tapToDragEnabled: false,
+            Keys.tapToDragButton: GestureMouseButton.middle.rawValue,
+            Keys.tapToDragTimeout: 0.2,
             // Palm rejection defaults
             Keys.exclusionZoneEnabled: false,
             Keys.exclusionZoneSize: 0.15,
@@ -113,6 +123,12 @@ public final class PreferencesManager: @unchecked Sendable {
         prefs.blockSystemGestures = userDefaults.bool(forKey: Keys.blockSystemGestures)
         prefs.middleDragEnabled = userDefaults.bool(forKey: Keys.middleDragEnabled)
         prefs.tapToClickEnabled = userDefaults.bool(forKey: Keys.tapToClickEnabled)
+        prefs.tapButton = GestureMouseButton(rawValue: userDefaults.string(forKey: Keys.tapButton) ?? "") ?? .middle
+        prefs.directDragButton = GestureMouseButton(rawValue: userDefaults.string(forKey: Keys.directDragButton) ?? "") ?? .middle
+        prefs.tapToDragEnabled = userDefaults.bool(forKey: Keys.tapToDragEnabled)
+        prefs.tapToDragButton = GestureMouseButton(rawValue: userDefaults.string(forKey: Keys.tapToDragButton) ?? "") ?? .middle
+        let timeout = userDefaults.double(forKey: Keys.tapToDragTimeout)
+        prefs.tapToDragTimeout = timeout.isFinite && timeout >= 0.001 && timeout <= 60 ? timeout : 0.2
         prefs.exclusionZoneEnabled = userDefaults.bool(forKey: Keys.exclusionZoneEnabled)
         prefs.exclusionZoneSize = userDefaults.double(forKey: Keys.exclusionZoneSize)
         prefs.requireModifierKey = userDefaults.bool(forKey: Keys.requireModifierKey)
@@ -148,6 +164,11 @@ public final class PreferencesManager: @unchecked Sendable {
         userDefaults.set(preferences.blockSystemGestures, forKey: Keys.blockSystemGestures)
         userDefaults.set(preferences.middleDragEnabled, forKey: Keys.middleDragEnabled)
         userDefaults.set(preferences.tapToClickEnabled, forKey: Keys.tapToClickEnabled)
+        userDefaults.set(preferences.tapButton.rawValue, forKey: Keys.tapButton)
+        userDefaults.set(preferences.directDragButton.rawValue, forKey: Keys.directDragButton)
+        userDefaults.set(preferences.tapToDragEnabled, forKey: Keys.tapToDragEnabled)
+        userDefaults.set(preferences.tapToDragButton.rawValue, forKey: Keys.tapToDragButton)
+        userDefaults.set(preferences.tapToDragTimeout, forKey: Keys.tapToDragTimeout)
         // Palm rejection
         userDefaults.set(preferences.exclusionZoneEnabled, forKey: Keys.exclusionZoneEnabled)
         userDefaults.set(preferences.exclusionZoneSize, forKey: Keys.exclusionZoneSize)

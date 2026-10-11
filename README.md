@@ -61,8 +61,9 @@ Mac trackpads don't have a middle mouse button. Many apps expect one.
 
 ## Features
 
-- **Three-finger tap** → Middle mouse click
-- **Three-finger drag** → Middle mouse drag (pan/orbit in 3D apps)
+- **Three-finger tap** → Middle mouse click by default; configurable left/middle/right button
+- **Three-finger drag** → Middle mouse drag by default; configurable left/middle/right button
+- **Tap to Drag** → Optional three-finger tap followed by a three-finger hold/drag, with an independent button and configurable timeout
 - **Works with system gestures** — Mission Control, Exposé, and other macOS gestures remain functional
 - **Native macOS app** — Menu bar interface, no terminal configuration required
 - **Configurable** — Adjust sensitivity and smoothing to your preference
@@ -105,10 +106,27 @@ MiddleDrag runs in your menu bar as a hand icon.
 |---------|--------|
 | Three-finger tap | Middle click |
 | Three-finger drag | Middle drag (pan/orbit) |
+| Three-finger tap, then three-finger hold/drag | Disabled by default |
+
+To combine middle clicks with left dragging in user space, configure the menu:
+
+1. **Tap to Click** → Enabled, Middle Button.
+2. **Direct Drag** → Enabled, Left Button.
+3. **Tap to Drag** → Enabled, Middle Button. Its timeout defaults to **200 ms**; choose a preset or **Custom…** to change it.
+
+Tap to Drag requires lifting after the first tap, then putting three fingers down again within the timeout. On the second contact, significant movement presses the selected button immediately. A stationary contact presses it at the existing tap-duration limit (150 ms by default), allowing a long press without moving. Lifting ends the hold or drag; existing cancellation and relift settings still apply.
+
+While Tap to Drag is enabled, ordinary tap clicks wait for its timeout. A following hold/drag consumes the first click. Two short taps still produce two clicks, and the latest tap can arm the next hold/drag. Small accidental movements remain taps under the existing movement threshold.
+
+All three gestures have independent enable switches and button choices. Tap to Drag also works with Tap to Click or Direct Drag disabled. Existing installations retain middle tapping and middle dragging with Tap to Drag off.
+
+This mode generates mouse events in MiddleDrag. Use it with macOS Accessibility three-finger dragging disabled; leave **Advanced → Window Bar Drag** off to have MiddleDrag handle title bars too.
 
 ### Settings
 
 - **Enabled** — Toggle gesture recognition
+- **Tap to Click / Direct Drag / Tap to Drag** — Independent enable switches and left/middle/right button choices
+- **Tap to Drag → Timeout** — Release-to-next-contact interval, with presets and custom milliseconds
 - **Drag Sensitivity** — Cursor speed during drag (0.5x – 2x)
 - **Require Exactly 3 Fingers** — Ignore 4+ finger touches
 - **Launch at Login** — Auto-start with macOS

@@ -4,7 +4,7 @@ import Foundation
 import Sentry
 @unsafe @preconcurrency import os.log
 
-/// Generates mouse events for middle-click and middle-drag operations
+/// Generates mouse events for configurable click and drag operations
 /// Thread-safety: Uses stateLock for internal synchronization
 final class MouseEventGenerator: @unchecked Sendable {
 
@@ -21,17 +21,21 @@ final class MouseEventGenerator: @unchecked Sendable {
     var stuckDragTimeout: TimeInterval = 10.0
 
     // State tracking - protected by stateLock for thread safety
-    // isMiddleMouseDown is read from multiple threads (updateDrag on gesture queue,
+    // isMouseButtonDown is read from multiple threads (updateDrag on gesture queue,
     // written on eventQueue), so it needs synchronization
     private let stateLock = NSLock()
-    private var _isMiddleMouseDown = false
-    private var isMiddleMouseDown: Bool {
-        get { stateLock.withLock { _isMiddleMouseDown } }
-        set { stateLock.withLock { _isMiddleMouseDown = newValue } }
+    private var _isMouseButtonDown = false
+    // Captured for the whole session; preferences may change before release.
+    private var _activeButton: GestureMouseButton = .middle
+    private var activeButton: GestureMouseButton { stateLock.withLock { _activeButton } }
+
+    private var isMouseButtonDown: Bool {
+        get { stateLock.withLock { _isMouseButtonDown } }
+        set { stateLock.withLock { _isMouseButtonDown = newValue } }
     }
     
     /// Drag session generation counter - protected by stateLock
-    /// Must be accessed atomically with isMiddleMouseDown to prevent race conditions
+    /// Must be accessed atomically with isMouseButtonDown to prevent race conditions
     private var _dragGeneration: UInt64 = 0
     
     private var eventSource: CGEventSource?
@@ -109,17 +113,28 @@ final class MouseEventGenerator: @unchecked Sendable {
 
     // MARK: - Public Interface
 
-    /// Start a middle mouse drag operation
+    /// Start a drag using the selected mouse button
     /// - Parameter screenPosition: Starting position (used for reference, actual position from current cursor)
-    func startDrag(at screenPosition: CGPoint) {
+    func startDrag(at screenPosition: CGPoint, button: GestureMouseButton = .middle,
+                   allowStationaryHold: Bool = false) {
+        // Drain older clicks/releases before posting a new button-down.
+        eventQueue.sync {
+            startDragLocked(at: screenPosition, button: button, allowStationaryHold: allowStationaryHold)
+        }
+    }
+
+    private func startDragLocked(at screenPosition: CGPoint, button: GestureMouseButton,
+                                 allowStationaryHold: Bool) {
+        stopWatchdog()
         // CRITICAL: If already in a drag state, cancel it first to prevent stuck drags.
         // Recovery must re-associate + clear state + invalidate generation atomically
         // so watchdog force-release cannot win a race and reassociate after we
         // disassociate for the new drag.
+        let previousButton = activeButton
         let recoveredExistingDrag = stateLock.withLock {
-            guard _isMiddleMouseDown else { return false }
+            guard _isMouseButtonDown else { return false }
             reassociateCursor()
-            _isMiddleMouseDown = false
+            _isMouseButtonDown = false
             _dragGeneration &+= 1  // Invalidate any watchdog release in-flight for old drag
             return true
         }
@@ -127,7 +142,7 @@ final class MouseEventGenerator: @unchecked Sendable {
             Log.warning("startDrag called while already dragging - canceling existing drag first", category: .gesture)
             // Send mouse up for the existing drag immediately (synchronously)
             let currentPos = currentMouseLocationQuartz
-            sendMiddleMouseUp(at: currentPos)
+            sendMouseUp(at: currentPos, button: previousButton)
         }
         
         let quartzPos = currentMouseLocationQuartz
@@ -162,22 +177,25 @@ final class MouseEventGenerator: @unchecked Sendable {
 
         // CRITICAL: Both flag AND mouse-down event must be set/sent SYNCHRONOUSLY.
         // This prevents two race conditions:
-        // 1. endDrag() seeing isMiddleMouseDown=false (original sticky bug)
+        // 1. endDrag() seeing isMouseButtonDown=false (original sticky bug)
         // 2. updateDrag() sending drag events before mouse-down reaches macOS
         //
-        // sendMiddleMouseDown() just creates and posts a CGEvent, which is thread-safe
+        // sendMouseDown() just creates and posts a CGEvent, which is thread-safe
         // and takes microseconds. No need for async dispatch here.
         //
-        // CRITICAL: isMiddleMouseDown and dragGeneration must be set ATOMICALLY
+        // CRITICAL: isMouseButtonDown and dragGeneration must be set ATOMICALLY
         // to prevent race with forceReleaseDrag() on watchdogQueue
         stateLock.withLock {
-            _isMiddleMouseDown = true
+            _isMouseButtonDown = true
+            _activeButton = button
             _dragGeneration &+= 1
         }
-        sendMiddleMouseDown(at: quartzPos)
+        sendMouseDown(at: quartzPos, button: button)
         
         // Start watchdog timer to detect stuck drags
-        startWatchdog()
+        // Intentional tap-to-drag holds may remain stationary indefinitely.
+        // Device stop, gesture cancellation, and manual release still release them.
+        if !allowStationaryHold { startWatchdog() }
     }
 
     /// Magic number to identify our own events (0x4D44 = 'MD')
@@ -188,7 +206,8 @@ final class MouseEventGenerator: @unchecked Sendable {
     ///   - deltaX: Horizontal movement delta (in pixels)
     ///   - deltaY: Vertical movement delta (in pixels)
     func updateDrag(deltaX: CGFloat, deltaY: CGFloat) {
-        guard isMiddleMouseDown else { return }
+        guard isMouseButtonDown else { return }
+        let button = activeButton
         
         activityLock.lock()
         lastActivityTime = CACurrentMediaTime()
@@ -232,9 +251,9 @@ final class MouseEventGenerator: @unchecked Sendable {
         guard
             let event = CGEvent(
                 mouseEventSource: eventSource,
-                mouseType: .otherMouseDragged,
+                mouseType: button.dragEvent,
                 mouseCursorPosition: targetPos,
-                mouseButton: .center
+                mouseButton: button.quartzButton
             )
         else { return }
 
@@ -244,7 +263,7 @@ final class MouseEventGenerator: @unchecked Sendable {
         event.setIntegerValueField(.mouseEventDeltaX, value: Int64(smoothedDeltaX.rounded()))
         event.setIntegerValueField(.mouseEventDeltaY, value: Int64(smoothedDeltaY.rounded()))
         
-        event.setIntegerValueField(.mouseEventButtonNumber, value: 2)
+        event.setIntegerValueField(.mouseEventButtonNumber, value: button.buttonNumber)
         event.setIntegerValueField(.eventSourceUserData, value: magicUserData)
         event.flags = []
         event.post(tap: .cghidEventTap)
@@ -255,7 +274,8 @@ final class MouseEventGenerator: @unchecked Sendable {
         CGWarpMouseCursorPosition(targetPos)
     }
     func endDrag() {
-        guard isMiddleMouseDown else { return }
+        guard isMouseButtonDown else { return }
+        let button = activeButton
         
         // Stop watchdog since drag is ending normally
         stopWatchdog()
@@ -266,7 +286,8 @@ final class MouseEventGenerator: @unchecked Sendable {
         // where stale reassociation can desync cursor association from drag state.
         stateLock.withLock {
             reassociateCursor()
-            _isMiddleMouseDown = false
+            _isMouseButtonDown = false
+            _dragGeneration &+= 1
         }
 
         eventQueue.async { [weak self] in
@@ -275,14 +296,15 @@ final class MouseEventGenerator: @unchecked Sendable {
             self.previousDeltaX = 0
             self.previousDeltaY = 0
             let currentPos = self.currentMouseLocationQuartz
-            self.sendMiddleMouseUp(at: currentPos)
+            self.sendMouseUp(at: currentPos, button: button)
         }
     }
 
-    /// Perform a middle mouse click
+    /// Perform a click using the selected mouse button
     /// Note: cancelDrag() should be called first if there might be an active drag.
     /// This method handles the edge case where rapid taps might leave the button stuck.
-    func performClick() {
+    func performClick(button: GestureMouseButton = .middle, at position: CGPoint? = nil,
+                      deduplicate: Bool = true) {
         eventQueue.async { [weak self] in
             guard let self = self else { return }
 
@@ -291,9 +313,9 @@ final class MouseEventGenerator: @unchecked Sendable {
             // 2. In a stuck state (edge case) - cancelDrag() should have handled this
             // Since cancelDrag() and performClick() are both on the same serial queue,
             // cancelDrag() will have already executed by the time this runs if it was called.
-            // If isMiddleMouseDown is still true here and cancelDrag() wasn't called,
+            // If isMouseButtonDown is still true here and cancelDrag() wasn't called,
             // it means we're in an active drag and shouldn't perform a click.
-            if self.isMiddleMouseDown {
+            if self.isMouseButtonDown {
                 // Don't interfere with active drags - just return
                 // This prevents glitches during drag operations
                 return
@@ -305,25 +327,25 @@ final class MouseEventGenerator: @unchecked Sendable {
             // physical user action. Since both dispatch here on the serial eventQueue, this
             // timestamp check reliably deduplicates them.
             let now = CACurrentMediaTime()
-            if now - self.lastClickTime < self.clickDeduplicationWindow {
+            if deduplicate && now - self.lastClickTime < self.clickDeduplicationWindow {
                 return
             }
             self.lastClickTime = now
 
-            let clickLocation = self.currentMouseLocationQuartz
+            let clickLocation = position ?? self.currentMouseLocationQuartz
 
             // Create mouse down event
             guard
                 let downEvent = CGEvent(
                     mouseEventSource: self.eventSource,
-                    mouseType: .otherMouseDown,
+                    mouseType: button.downEvent,
                     mouseCursorPosition: clickLocation,
-                    mouseButton: .center
+                    mouseButton: button.quartzButton
                 )
             else { return }
 
             downEvent.setIntegerValueField(.mouseEventClickState, value: 1)
-            downEvent.setIntegerValueField(.mouseEventButtonNumber, value: 2)
+            downEvent.setIntegerValueField(.mouseEventButtonNumber, value: button.buttonNumber)
             downEvent.setIntegerValueField(.eventSourceUserData, value: self.magicUserData)
             downEvent.flags = []
 
@@ -331,14 +353,14 @@ final class MouseEventGenerator: @unchecked Sendable {
             guard
                 let upEvent = CGEvent(
                     mouseEventSource: self.eventSource,
-                    mouseType: .otherMouseUp,
+                    mouseType: button.upEvent,
                     mouseCursorPosition: clickLocation,
-                    mouseButton: .center
+                    mouseButton: button.quartzButton
                 )
             else { return }
 
             upEvent.setIntegerValueField(.mouseEventClickState, value: 1)
-            upEvent.setIntegerValueField(.mouseEventButtonNumber, value: 2)
+            upEvent.setIntegerValueField(.mouseEventButtonNumber, value: button.buttonNumber)
             upEvent.setIntegerValueField(.eventSourceUserData, value: self.magicUserData)
             upEvent.flags = []
 
@@ -353,7 +375,8 @@ final class MouseEventGenerator: @unchecked Sendable {
 
     /// Cancel any active drag operation
     func cancelDrag() {
-        guard isMiddleMouseDown else { return }
+        guard isMouseButtonDown else { return }
+        let button = activeButton
         
         // Stop watchdog since drag is being cancelled
         stopWatchdog()
@@ -364,7 +387,8 @@ final class MouseEventGenerator: @unchecked Sendable {
         // reassociation, leaving cursor association out of sync with drag state.
         stateLock.withLock {
             reassociateCursor()
-            _isMiddleMouseDown = false
+            _isMouseButtonDown = false
+            _dragGeneration &+= 1
         }
 
         // Asynchronously send the mouse up event and clean up state
@@ -375,15 +399,18 @@ final class MouseEventGenerator: @unchecked Sendable {
             self.previousDeltaX = 0
             self.previousDeltaY = 0
             let currentPos = self.currentMouseLocationQuartz
-            self.sendMiddleMouseUp(at: currentPos)
+            self.sendMouseUp(at: currentPos, button: button)
         }
     }
     
-    /// Force send a MIDDLE_UP event regardless of internal state
-    /// Used for manual recovery when system state may be out of sync with our tracking
-    /// Unlike cancelDrag(), this ALWAYS sends an UP event even if isMiddleMouseDown is false
-    func forceMiddleMouseUp() {
-        Log.warning("Force sending MIDDLE_UP (unconditional)", category: .gesture)
+    /// Compatibility entry point for existing callers.
+    func forceMiddleMouseUp() { forceMouseUp() }
+
+    /// Release the session's selected button even if internal state says it is up.
+    /// Used for manual recovery when system state may be out of sync with tracking.
+    func forceMouseUp() {
+        let button = activeButton
+        Log.warning("Force releasing mouse button (unconditional)", category: .gesture)
         
         // Stop watchdog if running
         stopWatchdog()
@@ -393,13 +420,13 @@ final class MouseEventGenerator: @unchecked Sendable {
         // disassociates for a new session between reassociation and state update.
         let currentGeneration: UInt64 = stateLock.withLock {
             reassociateCursor()
-            _isMiddleMouseDown = false
+            _isMouseButtonDown = false
             return _dragGeneration
         }
         
         // Always send the UP event synchronously
         let pos = currentMouseLocationQuartz
-        sendMiddleMouseUp(at: pos)
+        sendMouseUp(at: pos, button: button)
         
         // Also send async as fallback (in case sync was swallowed)
         eventQueue.async { [weak self] in
@@ -413,7 +440,7 @@ final class MouseEventGenerator: @unchecked Sendable {
             self.previousDeltaY = 0
             
             let pos = self.currentMouseLocationQuartz
-            self.sendMiddleMouseUp(at: pos)
+            self.sendMouseUp(at: pos, button: button)
         }
     }
 
@@ -519,35 +546,35 @@ final class MouseEventGenerator: @unchecked Sendable {
 
     // MARK: - Private Methods
 
-    private func sendMiddleMouseDown(at location: CGPoint) {
+    private func sendMouseDown(at location: CGPoint, button: GestureMouseButton) {
         guard shouldPostEvents else { return }
         guard
             let event = CGEvent(
                 mouseEventSource: eventSource,
-                mouseType: .otherMouseDown,
+                mouseType: button.downEvent,
                 mouseCursorPosition: location,
-                mouseButton: .center
+                mouseButton: button.quartzButton
             )
         else { return }
 
-        event.setIntegerValueField(.mouseEventButtonNumber, value: 2)
+        event.setIntegerValueField(.mouseEventButtonNumber, value: button.buttonNumber)
         event.setIntegerValueField(.eventSourceUserData, value: magicUserData)
         event.flags = []
         event.post(tap: .cghidEventTap)
     }
 
-    private func sendMiddleMouseUp(at location: CGPoint) {
+    private func sendMouseUp(at location: CGPoint, button: GestureMouseButton) {
         guard shouldPostEvents else { return }
         guard
             let event = CGEvent(
                 mouseEventSource: eventSource,
-                mouseType: .otherMouseUp,
+                mouseType: button.upEvent,
                 mouseCursorPosition: location,
-                mouseButton: .center
+                mouseButton: button.quartzButton
             )
         else { return }
 
-        event.setIntegerValueField(.mouseEventButtonNumber, value: 2)
+        event.setIntegerValueField(.mouseEventButtonNumber, value: button.buttonNumber)
         event.setIntegerValueField(.eventSourceUserData, value: magicUserData)
         event.flags = []
         event.post(tap: .cghidEventTap)
@@ -592,10 +619,10 @@ final class MouseEventGenerator: @unchecked Sendable {
     /// Check if the drag has become stuck (no activity for too long)
     /// Called on watchdogQueue
     private func checkForStuckDrag() {
-        // CRITICAL: Atomically read both isMiddleMouseDown AND generation
+        // CRITICAL: Atomically read both isMouseButtonDown AND generation
         // This captures which drag session we're checking, preventing race with startDrag()
         let (isDragging, capturedGeneration): (Bool, UInt64) = stateLock.withLock {
-            (_isMiddleMouseDown, _dragGeneration)
+            (_isMouseButtonDown, _dragGeneration)
         }
         
         guard isDragging else {
@@ -644,18 +671,19 @@ final class MouseEventGenerator: @unchecked Sendable {
         stopWatchdogLocked()
         
         // CRITICAL: Verify generation, clear state, AND re-associate cursor atomically.
-        // If we release the lock between setting _isMiddleMouseDown = false and calling
+        // If we release the lock between setting _isMouseButtonDown = false and calling
         // reassociateCursor(), a concurrent startDrag on the gesture queue could
         // disassociate the cursor for a new drag, then our reassociateCursor() would
         // undo it — causing double-speed movement in the new drag.
         // CGAssociateMouseAndMouseCursorPosition is a fast syscall (~microseconds),
         // safe to call under lock.
+        let button = activeButton
         let releasedGeneration: UInt64? = stateLock.withLock {
             guard _dragGeneration == expectedGeneration else {
                 Log.info("forceReleaseDrag aborted - new drag session started (expected gen \(expectedGeneration), current \(_dragGeneration))", category: .gesture)
                 return nil
             }
-            _isMiddleMouseDown = false
+            _isMouseButtonDown = false
             reassociateCursor()
             return _dragGeneration
         }
@@ -667,7 +695,7 @@ final class MouseEventGenerator: @unchecked Sendable {
         
         // Send mouse up event synchronously to ensure it gets through
         let currentPos = currentMouseLocationQuartz
-        sendMiddleMouseUp(at: currentPos)
+        sendMouseUp(at: currentPos, button: button)
         
         // Also try sending via async queue in case the sync one gets swallowed
         // Only proceeds if no new drag has started (same generation)
@@ -685,7 +713,7 @@ final class MouseEventGenerator: @unchecked Sendable {
             self.previousDeltaY = 0
             
             let pos = self.currentMouseLocationQuartz
-            self.sendMiddleMouseUp(at: pos)
+            self.sendMouseUp(at: pos, button: button)
         }
     }
 }
