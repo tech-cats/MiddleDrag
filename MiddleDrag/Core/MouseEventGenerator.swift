@@ -112,6 +112,12 @@ final class MouseEventGenerator: @unchecked Sendable {
         eventSource = CGEventSource(stateID: .privateState)
     }
 
+    /// The private event source does not inherit keyboard modifiers. Read physical
+    /// state for each event so key changes during a drag are reflected immediately.
+    private var currentModifierFlags: CGEventFlags {
+        CGEventSource.flagsState(.hidSystemState)
+    }
+
     // MARK: - Public Interface
 
     /// Start a drag using the selected mouse button
@@ -269,7 +275,7 @@ final class MouseEventGenerator: @unchecked Sendable {
         
         event.setIntegerValueField(.mouseEventButtonNumber, value: button.buttonNumber)
         event.setIntegerValueField(.eventSourceUserData, value: magicUserData)
-        event.flags = []
+        event.flags = currentModifierFlags
         event.post(tap: .cghidEventTap)
         
         // Warp the visible cursor to match the accumulated position.
@@ -364,7 +370,7 @@ final class MouseEventGenerator: @unchecked Sendable {
             downEvent.setIntegerValueField(.mouseEventClickState, value: 1)
             downEvent.setIntegerValueField(.mouseEventButtonNumber, value: button.buttonNumber)
             downEvent.setIntegerValueField(.eventSourceUserData, value: self.magicUserData)
-            downEvent.flags = []
+            downEvent.flags = self.currentModifierFlags
 
             // Create mouse up event
             guard
@@ -382,7 +388,6 @@ final class MouseEventGenerator: @unchecked Sendable {
             upEvent.setIntegerValueField(.mouseEventClickState, value: 1)
             upEvent.setIntegerValueField(.mouseEventButtonNumber, value: button.buttonNumber)
             upEvent.setIntegerValueField(.eventSourceUserData, value: self.magicUserData)
-            upEvent.flags = []
 
             // Post events with small delay between them
             self._clickCount += 1
@@ -391,10 +396,11 @@ final class MouseEventGenerator: @unchecked Sendable {
                 return
             }
             GestureEventRecorder.shared.record("click.down_posted",
-                "request=\(requestID) source=\(source) contact=\(contactID) button=\(button.rawValue)")
+                "request=\(requestID) source=\(source) contact=\(contactID) button=\(button.rawValue) flags=\(downEvent.flags.rawValue)")
             downEvent.post(tap: .cghidEventTap)
             usleep(10000)  // 10ms delay
-            GestureEventRecorder.shared.record("click.up_posted", "request=\(requestID) button=\(button.rawValue)")
+            upEvent.flags = self.currentModifierFlags
+            GestureEventRecorder.shared.record("click.up_posted", "request=\(requestID) button=\(button.rawValue) flags=\(upEvent.flags.rawValue)")
             upEvent.post(tap: .cghidEventTap)
         }
     }
@@ -587,8 +593,8 @@ final class MouseEventGenerator: @unchecked Sendable {
 
         event.setIntegerValueField(.mouseEventButtonNumber, value: button.buttonNumber)
         event.setIntegerValueField(.eventSourceUserData, value: magicUserData)
-        event.flags = []
-        GestureEventRecorder.shared.record("button.edge_posted", "type=\(event.type.rawValue) button=\(button.rawValue)")
+        event.flags = currentModifierFlags
+        GestureEventRecorder.shared.record("button.edge_posted", "type=\(event.type.rawValue) button=\(button.rawValue) flags=\(event.flags.rawValue)")
         event.post(tap: .cghidEventTap)
     }
 
@@ -606,8 +612,8 @@ final class MouseEventGenerator: @unchecked Sendable {
 
         event.setIntegerValueField(.mouseEventButtonNumber, value: button.buttonNumber)
         event.setIntegerValueField(.eventSourceUserData, value: magicUserData)
-        event.flags = []
-        GestureEventRecorder.shared.record("button.edge_posted", "type=\(event.type.rawValue) button=\(button.rawValue)")
+        event.flags = currentModifierFlags
+        GestureEventRecorder.shared.record("button.edge_posted", "type=\(event.type.rawValue) button=\(button.rawValue) flags=\(event.flags.rawValue)")
         event.post(tap: .cghidEventTap)
     }
     
