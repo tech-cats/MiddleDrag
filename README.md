@@ -122,7 +122,15 @@ All three gestures have independent enable switches and button choices. Tap to D
 
 When enabled Direct Drag and Tap to Click use different buttons, physical three-finger left-button events are suppressed instead of immediately converted to the tap button. The recognizer then selects a tap or drag from the contact's movement and release. This prevents an incidental press from emitting a middle click just before a left drag. Physical-click conversion retains its legacy behavior when direct dragging is disabled or both buttons match.
 
-This mode generates mouse events in MiddleDrag. Use it with macOS Accessibility three-finger dragging disabled; leave **Advanced → Window Bar Drag** off to have MiddleDrag handle title bars too.
+This mode generates mouse events in MiddleDrag and suppresses competing scrolling. Use it with macOS Accessibility three-finger dragging disabled; leave **Advanced → Window Bar Drag** off to have MiddleDrag handle title bars too.
+
+### Scroll suppression
+
+MiddleDrag intercepts horizontal and vertical scroll events while its gesture flags are active, including direct drag and tap-to-drag. It also uses the existing 150 ms release cooldown. Ordinary scrolling outside that interval and gestures passed through by **Window Bar Drag** are allowed.
+
+**Gesture Diagnostics** records `scroll.event` with `decision=passed` or `decision=suppressed`, both axis deltas, and scroll/momentum phases.
+
+Events arriving before gesture recognition are not buffered, and momentum is not tracked beyond the release cooldown. Suppression applies to scroll events from any device during the handled gesture; raw touch callbacks remain unchanged.
 
 ### Settings
 

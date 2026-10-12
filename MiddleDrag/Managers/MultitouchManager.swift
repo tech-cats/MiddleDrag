@@ -665,8 +665,8 @@ public final class MultitouchManager: @unchecked Sendable {
 
     @discardableResult
     private func setupEventTap() -> Bool {
-        // Build event mask for mouse events to intercept
-        // We ONLY intercept mouse events - NOT gesture events
+        // Build event mask for mouse-button and scroll events to intercept.
+        // We do not subscribe to the private native gesture event types.
         // Intercepting gesture events (even just registering for them) causes
         // macOS to freeze when doing 4-finger Mission Control swipes
         var eventMask: CGEventMask = 0
@@ -679,6 +679,7 @@ public final class MultitouchManager: @unchecked Sendable {
         eventMask |= (1 << CGEventType.otherMouseDown.rawValue)
         eventMask |= (1 << CGEventType.otherMouseUp.rawValue)
         eventMask |= (1 << CGEventType.otherMouseDragged.rawValue)
+        eventMask |= (1 << CGEventType.scrollWheel.rawValue)
 
         // NOTE: We intentionally do NOT intercept gesture events (29-32)
         // Doing so causes Mission Control and other system gestures to freeze
@@ -806,6 +807,28 @@ public final class MultitouchManager: @unchecked Sendable {
         // fingerCountSafe or gestureRecognizer.state directly, because those flags
         // are only set when a valid gesture actually starts (respecting modifier keys)
         let gestureActive = modifierKeyHeld && (isInThreeFingerGesture || isActivelyDragging)
+
+        // Suppress competing scrolling using the existing gesture flags and
+        // release cooldown. Onset events are not buffered; scroll phases are
+        // recorded for diagnostics without additional momentum tracking.
+        if type == .scrollWheel {
+            let anyGestureEnabled = configuration.tapToClickEnabled
+                || configuration.middleDragEnabled || configuration.tapToDragEnabled
+            let withinReleaseCooldown = timeSinceGestureEnd < 0.15 && lastGestureWasActive
+            let suppressScroll = isEnabled && anyGestureEnabled
+                && !shouldPassThroughCurrentGesture && !isOurEvent
+                && (gestureActive || withinReleaseCooldown)
+            GestureEventRecorder.shared.record("scroll.event",
+                "decision=\(suppressScroll ? "suppressed" : "passed") "
+                + "horizontal=\(event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis2)) "
+                + "vertical=\(event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1)) "
+                + "phase=\(event.getIntegerValueField(.scrollWheelEventScrollPhase)) "
+                + "momentum_phase=\(event.getIntegerValueField(.scrollWheelEventMomentumPhase)) "
+                + "gesture_active=\(gestureActive) actively_dragging=\(isActivelyDragging) "
+                + "release_cooldown=\(withinReleaseCooldown) raw_finger_count=\(currentFingerCount) "
+                + "passthrough=\(shouldPassThroughCurrentGesture) own=\(isOurEvent)")
+            return suppressScroll ? nil : unsafe Unmanaged.passUnretained(event)
+        }
 
         if isOurEvent {
             if isButtonEdge {
