@@ -58,6 +58,7 @@ class GestureRecognizer: @unchecked Sendable {
         holdDeadline?.cancel()
         tapDeadline = nil
         holdDeadline = nil
+        if pendingTap { delegate?.gestureRecognizerDidDiscardPendingTap(self) }
         pendingTap = false
         isTapToDragContact = false
     }
@@ -434,6 +435,7 @@ class GestureRecognizer: @unchecked Sendable {
         let remaining = max(0, configuration.tapToDragTimeout - (frameTime - timestamp))
         GestureEventRecorder.shared.record("tap.deferred",
             "contact=\(traceContactID) released_at=\(timestamp) remaining=\(remaining) timeout=\(configuration.tapToDragTimeout)")
+        delegate?.gestureRecognizerDidDeferTap(self)
         timerQueue.asyncAfter(deadline: .now() + remaining, execute: work)
     }
 
@@ -544,6 +546,12 @@ protocol GestureRecognizerDelegate: AnyObject {
     /// Called when a tap click is committed (possibly after the sequence timeout)
     func gestureRecognizerDidTap(_ recognizer: GestureRecognizer)
 
+    /// Called on first-tap release when the sequence timeout is armed.
+    func gestureRecognizerDidDeferTap(_ recognizer: GestureRecognizer)
+
+    /// Called when a pending tap is discarded rather than committed or dragged.
+    func gestureRecognizerDidDiscardPendingTap(_ recognizer: GestureRecognizer)
+
     /// Called when dragging begins
     func gestureRecognizerDidBeginDragging(_ recognizer: GestureRecognizer)
 
@@ -563,4 +571,6 @@ protocol GestureRecognizerDelegate: AnyObject {
 // Existing delegates can accept taps without handling the delayed-click policy.
 extension GestureRecognizerDelegate {
     func gestureRecognizerShouldAcceptTap(_ recognizer: GestureRecognizer) -> Bool { true }
+    func gestureRecognizerDidDeferTap(_ recognizer: GestureRecognizer) {}
+    func gestureRecognizerDidDiscardPendingTap(_ recognizer: GestureRecognizer) {}
 }

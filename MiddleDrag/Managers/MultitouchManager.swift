@@ -86,6 +86,7 @@ public final class MultitouchManager: @unchecked Sendable {
         let enabled: Bool
         let deduplicate: Bool
         let contactID: UInt64
+        var isButtonDown = false
     }
     // Accessed only on gestureQueue, alongside the recognizer's pending tap.
     private var pendingTapClick: TapClick?
@@ -1132,16 +1133,39 @@ extension MultitouchManager: GestureRecognizerDelegate {
         guard let click = pendingTapClick else { return }
         pendingTapClick = nil
         GestureEventRecorder.shared.record("tap.click_committed",
-            "contact=\(click.contactID) current_contact=\(recognizer.traceContactID) enabled=\(click.enabled) button=\(click.button.rawValue)")
-        if click.enabled {
+            "contact=\(click.contactID) current_contact=\(recognizer.traceContactID) enabled=\(click.enabled) button=\(click.button.rawValue) already_pressed=\(click.isButtonDown)")
+        if click.isButtonDown {
+            mouseGenerator.endDrag()
+        } else if click.enabled {
             mouseGenerator.performClick(button: click.button, at: click.position,
                                         deduplicate: click.deduplicate, source: "recognized_tap",
                                         contactID: click.contactID)
         }
     }
 
-    func gestureRecognizerDidBeginDragging(_ recognizer: GestureRecognizer) {
+    func gestureRecognizerDidDeferTap(_ recognizer: GestureRecognizer) {
+        guard isEnabled, configuration.usesImmediateTapToDragPress,
+              var click = pendingTapClick, click.enabled else { return }
+        click.isButtonDown = mouseGenerator.pressButton(
+            at: click.position ?? MouseEventGenerator.currentMouseLocation, button: click.button)
+        pendingTapClick = click
+        GestureEventRecorder.shared.record("tap.early_press",
+            "contact=\(click.contactID) button=\(click.button.rawValue) pressed=\(click.isButtonDown)")
+    }
+
+    func gestureRecognizerDidDiscardPendingTap(_ recognizer: GestureRecognizer) {
+        if pendingTapClick?.isButtonDown == true { mouseGenerator.cancelDrag() }
         pendingTapClick = nil
+    }
+
+    func gestureRecognizerDidBeginDragging(_ recognizer: GestureRecognizer) {
+        let pendingClick = pendingTapClick
+        pendingTapClick = nil
+        var startedDrag = false
+        defer {
+            // A pending button-down must also be released when a drag is rejected.
+            if pendingClick?.isButtonDown == true && !startedDrag { mouseGenerator.cancelDrag() }
+        }
         guard isEnabled else { return }
         // Skip if this gesture is being passed through to system (e.g., title bar drag)
         if shouldPassThroughCurrentGesture {
@@ -1219,7 +1243,10 @@ extension MultitouchManager: GestureRecognizerDelegate {
         GestureEventRecorder.shared.record("drag.accepted",
             "contact=\(recognizer.traceContactID) button=\(button.rawValue) mode=\(recognizer.isTapToDragContact ? "tap_to_drag" : "direct")")
         mouseGenerator.startDrag(at: mouseLocation, button: button,
-                                 allowStationaryHold: recognizer.isTapToDragContact)
+                                 allowStationaryHold: recognizer.isTapToDragContact,
+                                 continuingButtonHold: recognizer.isTapToDragContact
+                                     && pendingClick?.isButtonDown == true)
+        startedDrag = true
     }
 
     func gestureRecognizerDidUpdateDragging(_ recognizer: GestureRecognizer, with data: GestureData)
@@ -1264,6 +1291,7 @@ extension MultitouchManager: GestureRecognizerDelegate {
     }
 
     func gestureRecognizerDidCancel(_ recognizer: GestureRecognizer) {
+        if pendingTapClick?.isButtonDown == true { mouseGenerator.cancelDrag() }
         pendingTapClick = nil
         // Cancel from early state (e.g., possibleTap) - reset state
         shouldPassThroughCurrentGesture = false

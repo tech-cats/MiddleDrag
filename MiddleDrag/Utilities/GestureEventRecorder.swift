@@ -89,6 +89,7 @@ final class GestureEventRecorder: @unchecked Sendable {
                + "direct_drag_enabled=\(config.middleDragEnabled) direct_drag_button=\(config.directDragButton.rawValue) "
                + "force_click_conversion=\(config.allowsForceClickConversion) "
                + "tap_to_drag_enabled=\(config.tapToDragEnabled) tap_to_drag_button=\(config.tapToDragButton.rawValue) "
+               + "immediate_press_enabled=\(config.tapToDragImmediatePress) immediate_press_effective=\(config.usesImmediateTapToDragPress) "
                + "sequence_timeout=\(config.tapToDragTimeout) tap_limit=\(config.tapThreshold) "
                + "max_tap_hold=\(config.maxTapHoldDuration) move_threshold=\(config.moveThreshold) "
                + "relift=\(config.allowReliftDuringDrag) modifier_required=\(config.requireModifierKey) modifier=\(config.modifierKeyType.rawValue) "

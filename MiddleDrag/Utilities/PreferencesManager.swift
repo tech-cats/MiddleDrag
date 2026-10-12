@@ -23,6 +23,7 @@ public final class PreferencesManager: @unchecked Sendable {
         static let tapToDragEnabled = "tapToDragEnabled"
         static let tapToDragButton = "tapToDragButton"
         static let tapToDragTimeout = "tapToDragTimeout"
+        static let tapToDragImmediatePress = "tapToDragImmediatePress"
         // Palm rejection keys
         static let exclusionZoneEnabled = "exclusionZoneEnabled"
         static let exclusionZoneSize = "exclusionZoneSize"
@@ -77,6 +78,7 @@ public final class PreferencesManager: @unchecked Sendable {
             Keys.tapToDragEnabled: false,
             Keys.tapToDragButton: GestureMouseButton.middle.rawValue,
             Keys.tapToDragTimeout: 0.2,
+            Keys.tapToDragImmediatePress: true,
             // Palm rejection defaults
             Keys.exclusionZoneEnabled: false,
             Keys.exclusionZoneSize: 0.15,
@@ -129,6 +131,7 @@ public final class PreferencesManager: @unchecked Sendable {
         prefs.tapToDragButton = GestureMouseButton(rawValue: userDefaults.string(forKey: Keys.tapToDragButton) ?? "") ?? .middle
         let timeout = userDefaults.double(forKey: Keys.tapToDragTimeout)
         prefs.tapToDragTimeout = timeout.isFinite && timeout >= 0.001 && timeout <= 60 ? timeout : 0.2
+        prefs.tapToDragImmediatePress = userDefaults.bool(forKey: Keys.tapToDragImmediatePress)
         prefs.exclusionZoneEnabled = userDefaults.bool(forKey: Keys.exclusionZoneEnabled)
         prefs.exclusionZoneSize = userDefaults.double(forKey: Keys.exclusionZoneSize)
         prefs.requireModifierKey = userDefaults.bool(forKey: Keys.requireModifierKey)
@@ -169,6 +172,7 @@ public final class PreferencesManager: @unchecked Sendable {
         userDefaults.set(preferences.tapToDragEnabled, forKey: Keys.tapToDragEnabled)
         userDefaults.set(preferences.tapToDragButton.rawValue, forKey: Keys.tapToDragButton)
         userDefaults.set(preferences.tapToDragTimeout, forKey: Keys.tapToDragTimeout)
+        userDefaults.set(preferences.tapToDragImmediatePress, forKey: Keys.tapToDragImmediatePress)
         // Palm rejection
         userDefaults.set(preferences.exclusionZoneEnabled, forKey: Keys.exclusionZoneEnabled)
         userDefaults.set(preferences.exclusionZoneSize, forKey: Keys.exclusionZoneSize)

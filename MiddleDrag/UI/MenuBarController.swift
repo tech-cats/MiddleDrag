@@ -228,7 +228,11 @@ public class MenuBarController: NSObject {
         choices.addItem(createMenuItem(title: "Custom…", action: #selector(setCustomTapToDragTimeout)))
         timeout.submenu = choices
         item.submenu?.addItem(timeout)
-        let explanation = NSMenuItem(title: "Tap clicks wait while Tap to Drag is enabled",
+        let immediatePress = createMenuItem(title: "Press Button on First Tap Release",
+                                            action: #selector(toggleTapToDragImmediatePress))
+        immediatePress.state = preferences.tapToDragImmediatePress ? .on : .off
+        item.submenu?.addItem(immediatePress)
+        let explanation = NSMenuItem(title: "Early press requires matching tap and drag buttons",
                                       action: nil, keyEquivalent: "")
         explanation.isEnabled = false
         item.submenu?.addItem(explanation)
@@ -621,6 +625,7 @@ public class MenuBarController: NSObject {
         config.tapToDragEnabled = preferences.tapToDragEnabled
         config.tapToDragButton = preferences.tapToDragButton
         config.tapToDragTimeout = preferences.tapToDragTimeout
+        config.tapToDragImmediatePress = preferences.tapToDragImmediatePress
         multitouchManager?.updateConfiguration(config)
         buildMenu()
         NotificationCenter.default.post(name: .preferencesChanged, object: preferences)
@@ -638,6 +643,11 @@ public class MenuBarController: NSObject {
 
     @objc func toggleTapToDrag() {
         preferences.tapToDragEnabled.toggle()
+        applyGesturePreferences()
+    }
+
+    @objc private func toggleTapToDragImmediatePress() {
+        preferences.tapToDragImmediatePress.toggle()
         applyGesturePreferences()
     }
 

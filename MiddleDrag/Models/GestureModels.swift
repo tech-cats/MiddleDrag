@@ -85,6 +85,13 @@ public struct GestureConfiguration: Sendable {
     var tapToDragEnabled: Bool = false
     var tapToDragButton: GestureMouseButton = .middle
     var tapToDragTimeout: Double = 0.2  // Release to next three-finger contact
+    var tapToDragImmediatePress: Bool = true
+
+    /// Press on the first tap's release only when either outcome uses this button.
+    var usesImmediateTapToDragPress: Bool {
+        tapToDragImmediatePress && tapToClickEnabled && tapToDragEnabled
+            && tapButton == tapToDragButton
+    }
 
     /// A physical left-button event can arrive before motion qualifies as a drag.
     /// Converting it to the tap button is ambiguous when direct dragging uses a
@@ -270,6 +277,7 @@ public struct UserPreferences: Codable, Sendable {
     var tapToDragEnabled: Bool = false
     var tapToDragButton: GestureMouseButton = .middle
     var tapToDragTimeout: Double = 0.2  // Release to next three-finger contact
+    var tapToDragImmediatePress: Bool = true
 
     // Palm rejection - Exclusion zone
     var exclusionZoneEnabled: Bool = false
@@ -324,6 +332,7 @@ public struct UserPreferences: Codable, Sendable {
             tapToDragEnabled: tapToDragEnabled,
             tapToDragButton: tapToDragButton,
             tapToDragTimeout: tapToDragTimeout,
+            tapToDragImmediatePress: tapToDragImmediatePress,
             exclusionZoneEnabled: exclusionZoneEnabled,
             exclusionZoneSize: Float(exclusionZoneSize),
             requireModifierKey: requireModifierKey,

@@ -114,9 +114,11 @@ To combine middle clicks with left dragging in user space, configure the menu:
 2. **Direct Drag** → Enabled, Left Button.
 3. **Tap to Drag** → Enabled, Middle Button. Its timeout defaults to **200 ms**; choose a preset or **Custom…** to change it.
 
-Tap to Drag requires lifting after the first tap, then putting three fingers down again within the timeout. On the second contact, significant movement presses the selected button immediately. A stationary contact presses it at the existing tap-duration limit (150 ms by default), allowing a long press without moving. Lifting ends the hold or drag; existing cancellation and relift settings still apply.
+Tap to Drag requires lifting after the first tap, then putting three fingers down again within the timeout. On the second contact, significant movement starts dragging immediately. A stationary contact becomes a hold at the existing tap-duration limit (150 ms by default), allowing a long press without moving. The button is pressed at that point if it was not pressed early as described below. Lifting ends the hold or drag; existing cancellation and relift settings still apply.
 
-While Tap to Drag is enabled, ordinary tap clicks wait for its timeout. A following hold/drag consumes the first click. Two short taps still produce two clicks, and the latest tap can arm the next hold/drag. Small accidental movements remain taps under the existing movement threshold.
+**Tap to Drag → Press Button on First Tap Release** is on by default. When Tap to Click and Tap to Drag are both enabled and use the same button, lifting the first tap presses that button immediately. If no second contact arrives within the timeout, the button is released to complete the click. A following hold/drag keeps the button pressed until release. The cursor remains free between contacts.
+
+When this option is off, or the two gestures use different buttons, ordinary tap clicks wait for the timeout and a following hold/drag consumes the first click. With either behavior, two short taps still produce two clicks, and the latest tap can arm the next hold/drag. Small accidental movements remain taps under the existing movement threshold. Tap to Click must be enabled for an early press; otherwise the first tap silently arms Tap to Drag as before.
 
 All three gestures have independent enable switches and button choices. Tap to Drag also works with Tap to Click or Direct Drag disabled. Existing installations retain middle tapping and middle dragging with Tap to Drag off.
 
@@ -137,6 +139,7 @@ Events arriving before gesture recognition are not buffered, and momentum is not
 - **Enabled** — Toggle gesture recognition
 - **Tap to Click / Direct Drag / Tap to Drag** — Independent enable switches and left/middle/right button choices
 - **Tap to Drag → Timeout** — Release-to-next-contact interval, with presets and custom milliseconds
+- **Tap to Drag → Press Button on First Tap Release** — Default-on early press when tap-click and tap-to-drag buttons match
 - **Drag Sensitivity** — Cursor speed during drag (0.5x – 2x)
 - **Require Exactly 3 Fingers** — Ignore 4+ finger touches
 - **Launch at Login** — Auto-start with macOS
@@ -147,7 +150,7 @@ Use **Advanced → Gesture Diagnostics → Start New Recording**, then use your 
 
 The local log records contact IDs, finger counts and touch states, normalized movement distances, tap/hold/release timer decisions, configured buttons, and requested/posted mouse-button edges. It also records external mouse-button events observed by MiddleDrag's event tap. It does not collect text, application/window names, or screen coordinates, and it is not uploaded through telemetry.
 
-For a middle click before a direct drag, find `user.unexpected_click` and look backwards for `click.down_posted`. Its `source` identifies `force_click` (an external left click converted by the event tap) or `recognized_tap` (a recognizer tap). Match `request` to `click.requested`, then follow `contact` through `touch.frame`, `contact.release_candidate`, `tap.recognized`, `tap.deferred`, and `drag.recognized`. If the middle-button edge is `button.edge_posted` instead, follow the preceding `drag.recognized` mode to see whether it was a tap-to-drag hold. A `request` without `click.down_posted` may have been skipped; `event_tap.received` with `own=false` identifies an event not tagged by MiddleDrag, but does not by itself identify which device or utility generated it.
+For a middle click before a direct drag, find `user.unexpected_click` and look backwards for `click.down_posted`. Its `source` identifies `force_click` (an external left click converted by the event tap) or `recognized_tap` (a recognizer tap). Match `request` to `click.requested`, then follow `contact` through `touch.frame`, `contact.release_candidate`, `tap.recognized`, `tap.deferred`, and `drag.recognized`. If the middle-button edge is `button.edge_posted` instead, look for `button.pending_press` and `tap.early_press` to identify a press on the first tap's release, or follow the preceding `drag.recognized` mode for a drag/hold press. A `request` without `click.down_posted` may have been skipped; `event_tap.received` with `own=false` identifies an event not tagged by MiddleDrag, but does not by itself identify which device or utility generated it.
 
 Existing operational logs are also available in macOS Console (filter for the MiddleDrag process), or with:
 

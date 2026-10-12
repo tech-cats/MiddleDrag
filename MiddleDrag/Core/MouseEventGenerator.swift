@@ -120,26 +120,51 @@ final class MouseEventGenerator: @unchecked Sendable {
 
     // MARK: - Public Interface
 
+    /// Hold the button while a tap waits for a possible second contact. Cursor
+    /// association stays unchanged until the contact actually becomes a drag.
+    /// The recognizer owns the timeout and cancellation of this pending press.
+    @discardableResult
+    func pressButton(at position: CGPoint, button: GestureMouseButton) -> Bool {
+        eventQueue.sync {
+            guard !isMouseButtonDown else { return false }
+            stopWatchdog()
+            stateLock.withLock {
+                _isMouseButtonDown = true
+                _activeButton = button
+                _dragGeneration &+= 1
+            }
+            eventSource?.localEventsSuppressionInterval = 0
+            GestureEventRecorder.shared.record("button.pending_press", "button=\(button.rawValue)")
+            sendMouseDown(at: position, button: button)
+            return true
+        }
+    }
+
     /// Start a drag using the selected mouse button
     /// - Parameter screenPosition: Starting position (used for reference, actual position from current cursor)
     func startDrag(at screenPosition: CGPoint, button: GestureMouseButton = .middle,
-                   allowStationaryHold: Bool = false) {
+                   allowStationaryHold: Bool = false, continuingButtonHold: Bool = false) {
         // Drain older clicks/releases before posting a new button-down.
         eventQueue.sync {
-            startDragLocked(at: screenPosition, button: button, allowStationaryHold: allowStationaryHold)
+            startDragLocked(at: screenPosition, button: button,
+                            allowStationaryHold: allowStationaryHold,
+                            continuingButtonHold: continuingButtonHold)
         }
     }
 
     private func startDragLocked(at screenPosition: CGPoint, button: GestureMouseButton,
-                                 allowStationaryHold: Bool) {
+                                 allowStationaryHold: Bool, continuingButtonHold: Bool) {
         stopWatchdog()
-        // CRITICAL: If already in a drag state, cancel it first to prevent stuck drags.
+        let continuesHeldButton = stateLock.withLock {
+            continuingButtonHold && _isMouseButtonDown && _activeButton == button
+        }
+        // Recover an existing drag unless explicitly continuing the pending press.
         // Recovery must re-associate + clear state + invalidate generation atomically
         // so watchdog force-release cannot win a race and reassociate after we
         // disassociate for the new drag.
         let previousButton = activeButton
         let recoveredExistingDrag = stateLock.withLock {
-            guard _isMouseButtonDown else { return false }
+            guard _isMouseButtonDown && !continuesHeldButton else { return false }
             reassociateCursor()
             _isMouseButtonDown = false
             _dragGeneration &+= 1  // Invalidate any watchdog release in-flight for old drag
@@ -199,8 +224,8 @@ final class MouseEventGenerator: @unchecked Sendable {
         }
         let generation = stateLock.withLock { _dragGeneration }
         GestureEventRecorder.shared.record("button.hold_started",
-            "generation=\(generation) button=\(button.rawValue) stationary_hold=\(allowStationaryHold)")
-        sendMouseDown(at: quartzPos, button: button)
+            "generation=\(generation) button=\(button.rawValue) stationary_hold=\(allowStationaryHold) continuing_press=\(continuesHeldButton)")
+        if !continuesHeldButton { sendMouseDown(at: quartzPos, button: button) }
         
         // Start watchdog timer to detect stuck drags
         // Intentional tap-to-drag holds may remain stationary indefinitely.
@@ -591,6 +616,7 @@ final class MouseEventGenerator: @unchecked Sendable {
             )
         else { return }
 
+        event.setIntegerValueField(.mouseEventClickState, value: 1)
         event.setIntegerValueField(.mouseEventButtonNumber, value: button.buttonNumber)
         event.setIntegerValueField(.eventSourceUserData, value: magicUserData)
         event.flags = currentModifierFlags
@@ -610,6 +636,7 @@ final class MouseEventGenerator: @unchecked Sendable {
             )
         else { return }
 
+        event.setIntegerValueField(.mouseEventClickState, value: 1)
         event.setIntegerValueField(.mouseEventButtonNumber, value: button.buttonNumber)
         event.setIntegerValueField(.eventSourceUserData, value: magicUserData)
         event.flags = currentModifierFlags
