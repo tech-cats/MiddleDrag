@@ -85,6 +85,7 @@ public final class MultitouchManager: @unchecked Sendable {
         let position: CGPoint?
         let enabled: Bool
         let deduplicate: Bool
+        let contactID: UInt64
     }
     // Accessed only on gestureQueue, alongside the recognizer's pending tap.
     private var pendingTapClick: TapClick?
@@ -612,6 +613,7 @@ public final class MultitouchManager: @unchecked Sendable {
 
     /// Invalidate queued frames and discard delayed clicks/holds on lifecycle changes.
     private func resetGestureProcessing() {
+        GestureEventRecorder.shared.record("manager.reset_requested", "enabled=\(isEnabled) monitoring=\(isMonitoring)")
         gestureEpochLock.withLock { gestureEpoch &+= 1 }
         gestureQueue.async { [weak self] in
             guard let self else { return }
@@ -747,6 +749,7 @@ public final class MultitouchManager: @unchecked Sendable {
 
         // Re-enable tap if it was disabled
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            GestureEventRecorder.shared.record("event_tap.reenabled", "type=\(type.rawValue)")
             if let tap = eventTap {
                 CGEvent.tapEnable(tap: tap, enable: true)
             }
@@ -766,6 +769,16 @@ public final class MultitouchManager: @unchecked Sendable {
         // We tagging events in MouseEventGenerator with this value
         let userData = event.getIntegerValueField(.eventSourceUserData)
         let isOurEvent = userData == 0x4D44
+        let isButtonEdge = type == .leftMouseDown || type == .leftMouseUp
+            || type == .rightMouseDown || type == .rightMouseUp
+            || type == .otherMouseDown || type == .otherMouseUp
+        if isButtonEdge {
+            GestureEventRecorder.shared.record("event_tap.received",
+                "type=\(type.rawValue) button=\(buttonNumber) own=\(isOurEvent) "
+                + "raw_finger_count=\(currentFingerCount) gesture_active=\(isInThreeFingerGesture) "
+                + "actively_dragging=\(isActivelyDragging) passthrough=\(shouldPassThroughCurrentGesture) "
+                + "source_pid=\(event.getIntegerValueField(.eventSourceUnixProcessID)) event_time_ns=\(event.timestamp)")
+        }
 
         // Check if modifier key is required and currently held
         // This ensures we only suppress events when a valid gesture is actually active
@@ -795,6 +808,9 @@ public final class MultitouchManager: @unchecked Sendable {
         let gestureActive = modifierKeyHeld && (isInThreeFingerGesture || isActivelyDragging)
 
         if isOurEvent {
+            if isButtonEdge {
+                GestureEventRecorder.shared.record("event_tap.passed", "type=\(type.rawValue) button=\(buttonNumber) own=true")
+            }
             return unsafe Unmanaged.passUnretained(event)
         }
 
@@ -807,12 +823,28 @@ public final class MultitouchManager: @unchecked Sendable {
         if hasThreeOrMoreFingers && isLeftButton && !isOurEvent && !isActivelyDragging && !shouldPassThroughCurrentGesture {
             // Check event type - we want to handle both down and up
             if type == .leftMouseDown || type == .leftMouseUp {
+                // An external left-down may arrive while a direct drag is still
+                // below the motion threshold (or before its main-thread flag
+                // updates). An immediate tap-button click cannot be undone if
+                // that contact becomes a drag with a different button.
+                // Suppress the external edges and let recognition decide the
+                // output; tagged synthetic edges already passed through above.
+                guard configuration.allowsForceClickConversion else {
+                    GestureEventRecorder.shared.record("event_tap.suppressed",
+                        "type=\(type.rawValue) reason=direct_drag_button_conflict "
+                        + "tap_button=\(configuration.tapButton.rawValue) direct_drag_button=\(configuration.directDragButton.rawValue)")
+                    return nil
+                }
                 // Perform a click using the configured tap button
                 if type == .leftMouseDown {
                     lastForceClickTime = CACurrentMediaTime()
-                    mouseGenerator.performClick(button: configuration.tapButton)
+                    GestureEventRecorder.shared.record("external.click_converted",
+                        "source=force_click button=\(configuration.tapButton.rawValue) raw_finger_count=\(currentFingerCount) "
+                        + "gesture_active=\(gestureActive) actively_dragging=\(isActivelyDragging)")
+                    mouseGenerator.performClick(button: configuration.tapButton, source: "force_click")
                 }
                 // Suppress the original left click
+                GestureEventRecorder.shared.record("event_tap.suppressed", "type=\(type.rawValue) reason=force_click_conversion")
                 return nil
             }
         }
@@ -822,9 +854,15 @@ public final class MultitouchManager: @unchecked Sendable {
         let shouldSuppress = gestureActive || (timeSinceGestureEnd < 0.15 && lastGestureWasActive)
 
         if shouldSuppress && !isMiddleButton {
+            if isButtonEdge {
+                GestureEventRecorder.shared.record("event_tap.suppressed", "type=\(type.rawValue) reason=gesture_or_cooldown")
+            }
             return nil  // Suppress the event
         }
 
+        if isButtonEdge {
+            GestureEventRecorder.shared.record("event_tap.passed", "type=\(type.rawValue) button=\(buttonNumber) own=false")
+        }
         return unsafe Unmanaged.passUnretained(event)
     }
 
@@ -832,6 +870,7 @@ public final class MultitouchManager: @unchecked Sendable {
 
     private func applyConfiguration() {
         let config = configuration
+        GestureEventRecorder.shared.recordConfiguration(config)
         gestureQueue.async { [weak self] in
             self?.gestureRecognizer.configuration = config
         }
@@ -901,9 +940,14 @@ extension MultitouchManager: DeviceMonitorDelegate {
         }
 
         let epoch = gestureEpochLock.withLock { gestureEpoch }
+        let enqueuedAt = CACurrentMediaTime()
         gestureQueue.async { [weak self] in
             guard let self, self.isEnabled,
                   self.gestureEpochLock.withLock({ self.gestureEpoch == epoch }) else { return }
+            let queueDelay = CACurrentMediaTime() - enqueuedAt
+            if queueDelay > 0.01 {
+                GestureEventRecorder.shared.record("touch.queue_delay", "seconds=\(queueDelay) frame_time=\(timestamp) raw=\(touchCount)")
+            }
             if let data = touchData {
                 unsafe data.withUnsafeBytes { rawBuffer in
                     guard let baseAddress = rawBuffer.baseAddress else { return }
@@ -938,6 +982,7 @@ extension MultitouchManager: GestureRecognizerDelegate {
         if shouldSkipGestureForTitleBar() {
             Log.debug("gestureRecognizerDidStart: Title bar detected - passing through to system", category: .gesture)
             shouldPassThroughCurrentGesture = true
+            GestureEventRecorder.shared.record("contact.passthrough", "contact=\(recognizer.traceContactID) reason=title_bar")
             recognizer.discardTapToDragSequence()
             pendingTapClick = nil
             // Don't set isInThreeFingerGesture - let system handle the gesture
@@ -967,6 +1012,8 @@ extension MultitouchManager: GestureRecognizerDelegate {
         // instability that ends and restarts the gesture (resetting per-gesture state).
         let timeSinceForceClick = CACurrentMediaTime() - lastForceClickTime
         if timeSinceForceClick < forceClickDeduplicationWindow {
+            GestureEventRecorder.shared.record("tap.rejected",
+                "contact=\(recognizer.traceContactID) reason=recent_force_click elapsed=\(timeSinceForceClick)")
             // Still reset gesture state
             DispatchQueue.main.async { [weak self] in
                 self?.isInThreeFingerGesture = false
@@ -979,6 +1026,7 @@ extension MultitouchManager: GestureRecognizerDelegate {
         
         // A silent tap may still arm tap-to-drag when tap clicks are disabled
         guard configuration.tapToClickEnabled || configuration.tapToDragEnabled else {
+            GestureEventRecorder.shared.record("tap.rejected", "contact=\(recognizer.traceContactID) reason=disabled")
             // Reset state even if tap is disabled
             DispatchQueue.main.async { [weak self] in
                 self?.isInThreeFingerGesture = false
@@ -994,6 +1042,7 @@ extension MultitouchManager: GestureRecognizerDelegate {
         //       of window size filter settings. This prevents the behavioral inconsistency where
         //       windowAtCursorMeetsMinimumSize would return true for desktop (no window found).
         if shouldSkipGestureForDesktop() {
+            GestureEventRecorder.shared.record("tap.rejected", "contact=\(recognizer.traceContactID) reason=desktop")
             // Cursor is over desktop - skip tap
             DispatchQueue.main.async { [weak self] in
                 self?.isInThreeFingerGesture = false
@@ -1044,9 +1093,12 @@ extension MultitouchManager: GestureRecognizerDelegate {
                 button: configuration.tapButton,
                 position: configuration.tapToDragEnabled ? MouseEventGenerator.currentMouseLocation : nil,
                 enabled: configuration.tapToClickEnabled,
-                deduplicate: !configuration.tapToDragEnabled
+                deduplicate: !configuration.tapToDragEnabled,
+                contactID: recognizer.traceContactID
             )
         }
+        GestureEventRecorder.shared.record("tap.eligibility",
+            "contact=\(recognizer.traceContactID) accepted=\(shouldPerformTap) click_enabled=\(configuration.tapToClickEnabled) button=\(configuration.tapButton.rawValue)")
         return shouldPerformTap
     }
 
@@ -1056,9 +1108,12 @@ extension MultitouchManager: GestureRecognizerDelegate {
         if pendingTapClick == nil && !gestureRecognizerShouldAcceptTap(recognizer) { return }
         guard let click = pendingTapClick else { return }
         pendingTapClick = nil
+        GestureEventRecorder.shared.record("tap.click_committed",
+            "contact=\(click.contactID) current_contact=\(recognizer.traceContactID) enabled=\(click.enabled) button=\(click.button.rawValue)")
         if click.enabled {
             mouseGenerator.performClick(button: click.button, at: click.position,
-                                        deduplicate: click.deduplicate)
+                                        deduplicate: click.deduplicate, source: "recognized_tap",
+                                        contactID: click.contactID)
         }
     }
 
@@ -1073,6 +1128,7 @@ extension MultitouchManager: GestureRecognizerDelegate {
         let dragEnabled = recognizer.isTapToDragContact
             ? configuration.tapToDragEnabled : configuration.middleDragEnabled
         guard dragEnabled else {
+            GestureEventRecorder.shared.record("drag.rejected", "contact=\(recognizer.traceContactID) reason=disabled")
             // Reset state even if drag is disabled
             DispatchQueue.main.async { [weak self] in
                 self?.isInThreeFingerGesture = false
@@ -1088,6 +1144,7 @@ extension MultitouchManager: GestureRecognizerDelegate {
         //       of window size filter settings. This prevents the behavioral inconsistency where
         //       windowAtCursorMeetsMinimumSize would return true for desktop (no window found).
         if shouldSkipGestureForDesktop() {
+            GestureEventRecorder.shared.record("drag.rejected", "contact=\(recognizer.traceContactID) reason=desktop")
             // Cursor is over desktop - skip drag
             DispatchQueue.main.async { [weak self] in
                 self?.isInThreeFingerGesture = false
@@ -1117,6 +1174,7 @@ extension MultitouchManager: GestureRecognizerDelegate {
                 }
             }
             if !meetsMinimumSize {
+                GestureEventRecorder.shared.record("drag.rejected", "contact=\(recognizer.traceContactID) reason=window_size")
                 // Window too small - skip drag
                 DispatchQueue.main.async { [weak self] in
                     self?.isInThreeFingerGesture = false
@@ -1135,6 +1193,8 @@ extension MultitouchManager: GestureRecognizerDelegate {
         let mouseLocation = MouseEventGenerator.currentMouseLocation
         let button = recognizer.isTapToDragContact
             ? configuration.tapToDragButton : configuration.directDragButton
+        GestureEventRecorder.shared.record("drag.accepted",
+            "contact=\(recognizer.traceContactID) button=\(button.rawValue) mode=\(recognizer.isTapToDragContact ? "tap_to_drag" : "direct")")
         mouseGenerator.startDrag(at: mouseLocation, button: button,
                                  allowStationaryHold: recognizer.isTapToDragContact)
     }

@@ -37,6 +37,7 @@ final class MouseEventGenerator: @unchecked Sendable {
     /// Drag session generation counter - protected by stateLock
     /// Must be accessed atomically with isMouseButtonDown to prevent race conditions
     private var _dragGeneration: UInt64 = 0
+    private var _clickRequestGeneration: UInt64 = 0
     
     private var eventSource: CGEventSource?
 
@@ -190,6 +191,9 @@ final class MouseEventGenerator: @unchecked Sendable {
             _activeButton = button
             _dragGeneration &+= 1
         }
+        let generation = stateLock.withLock { _dragGeneration }
+        GestureEventRecorder.shared.record("button.hold_started",
+            "generation=\(generation) button=\(button.rawValue) stationary_hold=\(allowStationaryHold)")
         sendMouseDown(at: quartzPos, button: button)
         
         // Start watchdog timer to detect stuck drags
@@ -276,6 +280,7 @@ final class MouseEventGenerator: @unchecked Sendable {
     func endDrag() {
         guard isMouseButtonDown else { return }
         let button = activeButton
+        GestureEventRecorder.shared.record("button.hold_ended", "button=\(button.rawValue) reason=release")
         
         // Stop watchdog since drag is ending normally
         stopWatchdog()
@@ -304,7 +309,14 @@ final class MouseEventGenerator: @unchecked Sendable {
     /// Note: cancelDrag() should be called first if there might be an active drag.
     /// This method handles the edge case where rapid taps might leave the button stuck.
     func performClick(button: GestureMouseButton = .middle, at position: CGPoint? = nil,
-                      deduplicate: Bool = true) {
+                      deduplicate: Bool = true, source: String = "unspecified",
+                      contactID: UInt64 = 0) {
+        let requestID = stateLock.withLock {
+            _clickRequestGeneration &+= 1
+            return _clickRequestGeneration
+        }
+        GestureEventRecorder.shared.record("click.requested",
+            "request=\(requestID) source=\(source) contact=\(contactID) button=\(button.rawValue) deduplicate=\(deduplicate)")
         eventQueue.async { [weak self] in
             guard let self = self else { return }
 
@@ -316,6 +328,7 @@ final class MouseEventGenerator: @unchecked Sendable {
             // If isMouseButtonDown is still true here and cancelDrag() wasn't called,
             // it means we're in an active drag and shouldn't perform a click.
             if self.isMouseButtonDown {
+                GestureEventRecorder.shared.record("click.skipped", "request=\(requestID) reason=button_already_down")
                 // Don't interfere with active drags - just return
                 // This prevents glitches during drag operations
                 return
@@ -328,6 +341,7 @@ final class MouseEventGenerator: @unchecked Sendable {
             // timestamp check reliably deduplicates them.
             let now = CACurrentMediaTime()
             if deduplicate && now - self.lastClickTime < self.clickDeduplicationWindow {
+                GestureEventRecorder.shared.record("click.skipped", "request=\(requestID) reason=deduplication elapsed=\(now - self.lastClickTime)")
                 return
             }
             self.lastClickTime = now
@@ -342,7 +356,10 @@ final class MouseEventGenerator: @unchecked Sendable {
                     mouseCursorPosition: clickLocation,
                     mouseButton: button.quartzButton
                 )
-            else { return }
+            else {
+                GestureEventRecorder.shared.record("click.skipped", "request=\(requestID) reason=event_creation_failed")
+                return
+            }
 
             downEvent.setIntegerValueField(.mouseEventClickState, value: 1)
             downEvent.setIntegerValueField(.mouseEventButtonNumber, value: button.buttonNumber)
@@ -357,7 +374,10 @@ final class MouseEventGenerator: @unchecked Sendable {
                     mouseCursorPosition: clickLocation,
                     mouseButton: button.quartzButton
                 )
-            else { return }
+            else {
+                GestureEventRecorder.shared.record("click.skipped", "request=\(requestID) reason=event_creation_failed")
+                return
+            }
 
             upEvent.setIntegerValueField(.mouseEventClickState, value: 1)
             upEvent.setIntegerValueField(.mouseEventButtonNumber, value: button.buttonNumber)
@@ -366,9 +386,15 @@ final class MouseEventGenerator: @unchecked Sendable {
 
             // Post events with small delay between them
             self._clickCount += 1
-            guard self.shouldPostEvents else { return }
+            guard self.shouldPostEvents else {
+                GestureEventRecorder.shared.record("click.skipped", "request=\(requestID) reason=CI")
+                return
+            }
+            GestureEventRecorder.shared.record("click.down_posted",
+                "request=\(requestID) source=\(source) contact=\(contactID) button=\(button.rawValue)")
             downEvent.post(tap: .cghidEventTap)
             usleep(10000)  // 10ms delay
+            GestureEventRecorder.shared.record("click.up_posted", "request=\(requestID) button=\(button.rawValue)")
             upEvent.post(tap: .cghidEventTap)
         }
     }
@@ -377,6 +403,7 @@ final class MouseEventGenerator: @unchecked Sendable {
     func cancelDrag() {
         guard isMouseButtonDown else { return }
         let button = activeButton
+        GestureEventRecorder.shared.record("button.hold_ended", "button=\(button.rawValue) reason=cancel")
         
         // Stop watchdog since drag is being cancelled
         stopWatchdog()
@@ -547,6 +574,7 @@ final class MouseEventGenerator: @unchecked Sendable {
     // MARK: - Private Methods
 
     private func sendMouseDown(at location: CGPoint, button: GestureMouseButton) {
+        GestureEventRecorder.shared.record("button.down_requested", "button=\(button.rawValue) posting_enabled=\(shouldPostEvents)")
         guard shouldPostEvents else { return }
         guard
             let event = CGEvent(
@@ -560,10 +588,12 @@ final class MouseEventGenerator: @unchecked Sendable {
         event.setIntegerValueField(.mouseEventButtonNumber, value: button.buttonNumber)
         event.setIntegerValueField(.eventSourceUserData, value: magicUserData)
         event.flags = []
+        GestureEventRecorder.shared.record("button.edge_posted", "type=\(event.type.rawValue) button=\(button.rawValue)")
         event.post(tap: .cghidEventTap)
     }
 
     private func sendMouseUp(at location: CGPoint, button: GestureMouseButton) {
+        GestureEventRecorder.shared.record("button.up_requested", "button=\(button.rawValue) posting_enabled=\(shouldPostEvents)")
         guard shouldPostEvents else { return }
         guard
             let event = CGEvent(
@@ -577,6 +607,7 @@ final class MouseEventGenerator: @unchecked Sendable {
         event.setIntegerValueField(.mouseEventButtonNumber, value: button.buttonNumber)
         event.setIntegerValueField(.eventSourceUserData, value: magicUserData)
         event.flags = []
+        GestureEventRecorder.shared.record("button.edge_posted", "type=\(event.type.rawValue) button=\(button.rawValue)")
         event.post(tap: .cghidEventTap)
     }
     

@@ -23,6 +23,10 @@ class GestureRecognizer: @unchecked Sendable {
     private var gestureStartPosition: MTPoint?
     private var lastCentroid: MTPoint?
     private var frameCount: Int = 0
+    private(set) var traceContactID: UInt64 = 0
+    private var pendingTapContactID: UInt64 = 0
+    private var lastTraceFingerCount = -1
+    private var traceMaximumMovement: Float = 0
 
     // Stability tracking - prevents false gesture ends during brief state transitions
     private var stableFrameCount: Int = 0
@@ -47,6 +51,8 @@ class GestureRecognizer: @unchecked Sendable {
 
     /// Drop sequence history when the coordinator rejects/passes through a gesture.
     func discardTapToDragSequence() {
+        GestureEventRecorder.shared.record("sequence.discarded",
+            "contact=\(traceContactID) pending=\(pendingTap) pending_contact=\(pendingTapContactID) state=\(state)")
         deadlineGeneration &+= 1
         tapDeadline?.cancel()
         holdDeadline?.cancel()
@@ -94,6 +100,7 @@ class GestureRecognizer: @unchecked Sendable {
             if !requiredFlagPresent {
                 // Required modifier not held - cancel any active gesture and return
                 if state != .idle || pendingTap {
+                    GestureEventRecorder.shared.record("contact.modifier_missing", "contact=\(traceContactID) state=\(state)")
                     handleGestureCancel()
                 }
                 return
@@ -131,10 +138,22 @@ class GestureRecognizer: @unchecked Sendable {
         }
 
         let fingerCount = validFingers.count
+        // Keep every candidate-tap frame, but only finger-count changes during
+        // established drags. This captures brief dropouts without logging motion forever.
+        if state == .possibleTap || fingerCount != lastTraceFingerCount {
+            GestureEventRecorder.shared.record("touch.frame",
+                "contact=\(traceContactID) frame_time=\(timestamp) raw=\(count) valid=\(fingerCount) "
+                + "touch_states=\((0..<count).map { unsafe touchArray[$0].state }) "
+                + "finger_ids=\((0..<count).map { unsafe touchArray[$0].fingerID }) "
+                + "state=\(state) release_frames=\(stableFrameCount) pending=\(pendingTap) "
+                + "pending_contact=\(pendingTapContactID) tap_to_drag_contact=\(isTapToDragContact)")
+        }
+        lastTraceFingerCount = fingerCount
 
         // ALWAYS cancel on 4+ fingers regardless of configuration
         // This ensures Mission Control and other system gestures always work
         if fingerCount >= 4 {
+            GestureEventRecorder.shared.record("contact.four_finger_cancel", "contact=\(traceContactID) valid=\(fingerCount)")
             if state != .idle || pendingTap {
                 handleGestureCancel()
             }
@@ -168,7 +187,11 @@ class GestureRecognizer: @unchecked Sendable {
             // Gesture no longer valid for current finger count
             // (needs 3 to start, or 2+ if allowReliftDuringDrag is on during drag)
             // Use stable frame count to prevent false ends during brief transitions
-            if releaseTime == nil { releaseTime = timestamp }
+            if releaseTime == nil {
+                releaseTime = timestamp
+                GestureEventRecorder.shared.record("contact.release_candidate",
+                    "contact=\(traceContactID) frame_time=\(timestamp) valid=\(fingerCount) state=\(state)")
+            }
             // Do not turn a contact already lifting into a hold during release debounce.
             holdDeadline?.cancel()
             holdDeadline = nil
@@ -177,6 +200,7 @@ class GestureRecognizer: @unchecked Sendable {
                 scheduleReleaseConfirmation(at: timestamp)
             }
             if stableFrameCount >= 2 {
+                GestureEventRecorder.shared.record("contact.release_confirmed", "contact=\(traceContactID) via=two_frames")
                 handleGestureEnd(timestamp: timestamp)
             }
         }
@@ -186,6 +210,7 @@ class GestureRecognizer: @unchecked Sendable {
 
     /// Reset gesture recognition state
     func reset() {
+        GestureEventRecorder.shared.record("recognizer.reset", "contact=\(traceContactID) state=\(state)")
         discardTapToDragSequence()
         resetContact()
     }
@@ -213,6 +238,9 @@ class GestureRecognizer: @unchecked Sendable {
     // MARK: - Private Methods
 
     private func handleValidGesture(fingers: [MTPoint], timestamp: Double) {
+        if stableFrameCount > 0 {
+            GestureEventRecorder.shared.record("contact.release_aborted", "contact=\(traceContactID) frame_time=\(timestamp)")
+        }
         releaseGeneration &+= 1
         releaseDeadline?.cancel()
         releaseDeadline = nil
@@ -225,6 +253,7 @@ class GestureRecognizer: @unchecked Sendable {
         if let last = lastCentroid {
             let jump = centroid.distance(to: last)
             if jump > 0.15 {
+                GestureEventRecorder.shared.record("motion.jump_filtered", "contact=\(traceContactID) displacement=\(jump)")
                 lastCentroid = centroid
                 lastFingerPositions = fingers
                 return
@@ -233,9 +262,13 @@ class GestureRecognizer: @unchecked Sendable {
 
         switch state {
         case .idle:
+            traceContactID &+= 1
+            traceMaximumMovement = 0
             // Claim the preceding tap before its delayed click can be emitted.
             if pendingTap {
                 let interval = timestamp - pendingTapReleaseTime
+                GestureEventRecorder.shared.record("sequence.next_contact",
+                    "contact=\(traceContactID) pending_contact=\(pendingTapContactID) gap=\(interval) timeout=\(configuration.tapToDragTimeout)")
                 if interval >= 0 && interval <= configuration.tapToDragTimeout {
                     isTapToDragContact = true
                     tapDeadline?.cancel()
@@ -249,6 +282,8 @@ class GestureRecognizer: @unchecked Sendable {
             gestureStartPosition = centroid
             lastCentroid = centroid
             lastFingerPositions = fingers
+            GestureEventRecorder.shared.record("contact.started",
+                "contact=\(traceContactID) frame_time=\(timestamp) tap_to_drag_contact=\(isTapToDragContact)")
             delegate?.gestureRecognizerDidStart(self, at: centroid)
             if isTapToDragContact { scheduleHoldDeadline() }
 
@@ -256,9 +291,15 @@ class GestureRecognizer: @unchecked Sendable {
             // Check if we should transition to drag
             guard let startPos = gestureStartPosition else { return }
             let movement = startPos.distance(to: centroid)
+            traceMaximumMovement = max(traceMaximumMovement, movement)
+            GestureEventRecorder.shared.record("tap.motion",
+                "contact=\(traceContactID) elapsed=\(timestamp - gestureStartTime) displacement=\(movement) "
+                + "max_displacement=\(traceMaximumMovement) threshold=\(configuration.moveThreshold)")
             let holdLimit = min(configuration.tapThreshold, configuration.maxTapHoldDuration)
             if movement > configuration.moveThreshold
                 || (isTapToDragContact && timestamp - gestureStartTime >= holdLimit) {
+                GestureEventRecorder.shared.record("drag.threshold_reached",
+                    "contact=\(traceContactID) movement=\(movement > configuration.moveThreshold) elapsed=\(timestamp - gestureStartTime)")
                 beginDragging()
                 lastCentroid = centroid
             } else {
@@ -299,6 +340,8 @@ class GestureRecognizer: @unchecked Sendable {
     }
 
     private func beginDragging() {
+        GestureEventRecorder.shared.record("drag.recognized",
+            "contact=\(traceContactID) mode=\(isTapToDragContact ? "tap_to_drag" : "direct") consumes_pending=\(pendingTap)")
         holdDeadline?.cancel()
         holdDeadline = nil
         if isTapToDragContact {
@@ -338,6 +381,7 @@ class GestureRecognizer: @unchecked Sendable {
                   self.stableFrameCount > 0, self.state != .idle else { return }
             // Hardware need not send a second empty frame. Retain the release
             // debounce, but guarantee taps/holds finish when callbacks go quiet.
+            GestureEventRecorder.shared.record("contact.release_confirmed", "contact=\(self.traceContactID) via=timer")
             self.handleGestureEnd(timestamp: timestamp + 0.02)
         }
         releaseDeadline = work
@@ -355,6 +399,7 @@ class GestureRecognizer: @unchecked Sendable {
                 self.handleGestureCancel()
                 return
             }
+            GestureEventRecorder.shared.record("hold.deadline_fired", "contact=\(self.traceContactID)")
             self.beginDragging()
         }
         holdDeadline = work
@@ -363,6 +408,8 @@ class GestureRecognizer: @unchecked Sendable {
 
     private func commitPendingTap() {
         guard pendingTap else { return }
+        GestureEventRecorder.shared.record("tap.pending_committed",
+            "contact=\(traceContactID) pending_contact=\(pendingTapContactID) state=\(state)")
         pendingTap = false
         tapDeadline?.cancel()
         tapDeadline = nil
@@ -371,18 +418,22 @@ class GestureRecognizer: @unchecked Sendable {
 
     private func deferTap(releasedAt timestamp: Double, processedAt frameTime: Double) {
         pendingTap = true
+        pendingTapContactID = traceContactID
         pendingTapReleaseTime = timestamp
         deadlineGeneration &+= 1
         let generation = deadlineGeneration
         let work = DispatchWorkItem { [weak self] in
             guard let self, self.deadlineGeneration == generation,
                   self.state == .idle else { return }
+            GestureEventRecorder.shared.record("tap.deadline_fired", "pending_contact=\(self.pendingTapContactID)")
             self.commitPendingTap()
         }
         tapDeadline = work
         // Frame timestamps need not share Dispatch's epoch. Only subtract frame
         // timestamps from each other, then schedule the remaining duration.
         let remaining = max(0, configuration.tapToDragTimeout - (frameTime - timestamp))
+        GestureEventRecorder.shared.record("tap.deferred",
+            "contact=\(traceContactID) released_at=\(timestamp) remaining=\(remaining) timeout=\(configuration.tapToDragTimeout)")
         timerQueue.asyncAfter(deadline: .now() + remaining, execute: work)
     }
 
@@ -390,6 +441,9 @@ class GestureRecognizer: @unchecked Sendable {
         // Preserve legacy release-debounce timing when the new feature is off.
         let endedAt = configuration.tapToDragEnabled ? (releaseTime ?? timestamp) : timestamp
         let elapsed = endedAt - gestureStartTime
+        GestureEventRecorder.shared.record("contact.ended",
+            "contact=\(traceContactID) state=\(state) elapsed=\(elapsed) max_displacement=\(traceMaximumMovement) "
+            + "tap_limit=\(configuration.tapThreshold) tap_to_drag_contact=\(isTapToDragContact)")
 
         // A release frame can arrive before a queued hold deadline is serviced.
         // Classify that long second contact as a press/release, consuming the tap.
@@ -404,11 +458,13 @@ class GestureRecognizer: @unchecked Sendable {
             if elapsed < configuration.tapThreshold && elapsed <= configuration.maxTapHoldDuration {
                 // Eligibility is checked at recognition, before storing a delayed click.
                 let accepted = delegate?.gestureRecognizerShouldAcceptTap(self) ?? true
+                GestureEventRecorder.shared.record("tap.recognized", "contact=\(traceContactID) accepted=\(accepted)")
                 resetContact()
                 if accepted {
                     if configuration.tapToDragEnabled {
                         deferTap(releasedAt: endedAt, processedAt: timestamp)
                     } else {
+                        GestureEventRecorder.shared.record("tap.immediate", "contact=\(traceContactID)")
                         delegate?.gestureRecognizerDidTap(self)
                     }
                 }
@@ -427,6 +483,7 @@ class GestureRecognizer: @unchecked Sendable {
 
     /// Cancel gesture without completing it (e.g., when 4th finger detected)
     private func handleGestureCancel() {
+        GestureEventRecorder.shared.record("contact.cancelled", "contact=\(traceContactID) state=\(state) pending=\(pendingTap)")
         switch state {
         case .possibleTap:
             // Cancel the possible tap - notify delegate so it can reset state

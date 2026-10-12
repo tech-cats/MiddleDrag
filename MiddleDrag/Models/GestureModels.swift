@@ -86,6 +86,13 @@ public struct GestureConfiguration: Sendable {
     var tapToDragButton: GestureMouseButton = .middle
     var tapToDragTimeout: Double = 0.2  // Release to next three-finger contact
 
+    /// A physical left-button event can arrive before motion qualifies as a drag.
+    /// Converting it to the tap button is ambiguous when direct dragging uses a
+    /// different button. Let the recognizer choose tap versus drag in that case.
+    var allowsForceClickConversion: Bool {
+        !middleDragEnabled || directDragButton == tapButton
+    }
+
     // Velocity scaling
     var enableVelocityBoost: Bool = true
     var maxVelocityBoost: Float = 2.0

@@ -120,6 +120,8 @@ While Tap to Drag is enabled, ordinary tap clicks wait for its timeout. A follow
 
 All three gestures have independent enable switches and button choices. Tap to Drag also works with Tap to Click or Direct Drag disabled. Existing installations retain middle tapping and middle dragging with Tap to Drag off.
 
+When enabled Direct Drag and Tap to Click use different buttons, physical three-finger left-button events are suppressed instead of immediately converted to the tap button. The recognizer then selects a tap or drag from the contact's movement and release. This prevents an incidental press from emitting a middle click just before a left drag. Physical-click conversion retains its legacy behavior when direct dragging is disabled or both buttons match.
+
 This mode generates mouse events in MiddleDrag. Use it with macOS Accessibility three-finger dragging disabled; leave **Advanced → Window Bar Drag** off to have MiddleDrag handle title bars too.
 
 ### Settings
@@ -130,6 +132,22 @@ This mode generates mouse events in MiddleDrag. Use it with macOS Accessibility 
 - **Drag Sensitivity** — Cursor speed during drag (0.5x – 2x)
 - **Require Exactly 3 Fingers** — Ignore 4+ finger touches
 - **Launch at Login** — Auto-start with macOS
+
+### Diagnosing unexpected clicks
+
+Use **Advanced → Gesture Diagnostics → Start New Recording**, then use your trackpad normally. After an unexpected click, choose **Mark Unexpected Click**, then **Stop Recording** and **Save Event Log…**. Starting a new recording clears the previous buffer; stopping preserves it for export. Recording is off at launch and retains the newest 30,000 records in memory, so mark and save soon after the glitch.
+
+The local log records contact IDs, finger counts and touch states, normalized movement distances, tap/hold/release timer decisions, configured buttons, and requested/posted mouse-button edges. It also records external mouse-button events observed by MiddleDrag's event tap. It does not collect text, application/window names, or screen coordinates, and it is not uploaded through telemetry.
+
+For a middle click before a direct drag, find `user.unexpected_click` and look backwards for `click.down_posted`. Its `source` identifies `force_click` (an external left click converted by the event tap) or `recognized_tap` (a recognizer tap). Match `request` to `click.requested`, then follow `contact` through `touch.frame`, `contact.release_candidate`, `tap.recognized`, `tap.deferred`, and `drag.recognized`. If the middle-button edge is `button.edge_posted` instead, follow the preceding `drag.recognized` mode to see whether it was a tap-to-drag hold. A `request` without `click.down_posted` may have been skipped; `event_tap.received` with `own=false` identifies an event not tagged by MiddleDrag, but does not by itself identify which device or utility generated it.
+
+Existing operational logs are also available in macOS Console (filter for the MiddleDrag process), or with:
+
+```bash
+log stream --style compact --level debug --predicate 'process == "MiddleDrag"'
+```
+
+Those logs are less detailed, and debug messages are excluded from release builds. The local gesture recorder works in both debug and release builds.
 
 ## Why MiddleDrag?
 

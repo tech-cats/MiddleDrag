@@ -1,5 +1,6 @@
 import Cocoa
 import Carbon.HIToolbox
+import UniformTypeIdentifiers
 
 /// Manages the menu bar UI and user interactions
 @MainActor
@@ -380,6 +381,7 @@ public class MenuBarController: NSObject {
         )
         forceReleaseItem.target = self
         submenu.addItem(forceReleaseItem)
+        submenu.addItem(createGestureDiagnosticsMenu())
         
         submenu.addItem(NSMenuItem.separator())
 
@@ -426,6 +428,62 @@ public class MenuBarController: NSObject {
 
         item.submenu = submenu
         return item
+    }
+
+    private func createGestureDiagnosticsMenu() -> NSMenuItem {
+        let recorder = GestureEventRecorder.shared
+        let item = NSMenuItem(title: "Gesture Diagnostics", action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+        submenu.autoenablesItems = false
+        submenu.addItem(createMenuItem(
+            title: recorder.isRecording ? "Stop Recording" : "Start New Recording",
+            action: #selector(toggleGestureRecording)))
+        let mark = createMenuItem(title: "Mark Unexpected Click", action: #selector(markUnexpectedClick))
+        mark.isEnabled = recorder.isRecording
+        submenu.addItem(mark)
+        let save = createMenuItem(title: "Save Event Log…", action: #selector(saveGestureEventLog))
+        save.isEnabled = recorder.hasRecords
+        submenu.addItem(save)
+        submenu.addItem(.separator())
+        let note = NSMenuItem(title: "Local only · newest 30,000 records · cleared on restart",
+                              action: nil, keyEquivalent: "")
+        note.isEnabled = false
+        submenu.addItem(note)
+        item.submenu = submenu
+        return item
+    }
+
+    @objc private func toggleGestureRecording() {
+        let recorder = GestureEventRecorder.shared
+        if recorder.isRecording {
+            recorder.stop()
+        } else {
+            recorder.start()
+            recorder.recordConfiguration(multitouchManager?.configuration ?? preferences.gestureConfig)
+            recorder.record("manager.status",
+                            "enabled=\(multitouchManager?.isEnabled ?? false) monitoring=\(multitouchManager?.isMonitoring ?? false)")
+        }
+        buildMenu()
+    }
+
+    @objc private func markUnexpectedClick() {
+        GestureEventRecorder.shared.record("user.unexpected_click", "Look immediately before this marker for the unintended click and drag.")
+    }
+
+    @objc private func saveGestureEventLog() {
+        let panel = NSSavePanel()
+        panel.title = "Save MiddleDrag Gesture Event Log"
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd-HHmmss"
+        panel.nameFieldStringValue = "MiddleDrag-gestures-\(formatter.string(from: Date())).log"
+        panel.allowedContentTypes = [UTType(filenameExtension: "log") ?? .plainText]
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try GestureEventRecorder.shared.snapshot().write(to: url, atomically: true, encoding: .utf8)
+        } catch {
+            NSAlert(error: error).runModal()
+        }
     }
 
     private func createPalmRejectionMenu() -> NSMenuItem {
