@@ -102,6 +102,8 @@ gh attestation verify ~/Downloads/MiddleDrag-{VERSION}.pkg --repo NullPointerDep
 
 MiddleDrag runs in your menu bar as a hand icon.
 
+Click any of the seven gesture menu items to toggle it directly, or hover over it to open its configuration submenu. The submenu's **Enabled** item also toggles the gesture.
+
 | Gesture | Action |
 |---------|--------|
 | Three-finger tap | Middle click |

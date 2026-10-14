@@ -210,6 +210,11 @@ public class MenuBarController: NSObject {
             submenu.addItem(choice)
         }
         item.submenu = submenu
+        // Set the action after attaching the submenu so the parent also toggles
+        // on selection, while hovering still opens its configuration choices.
+        item.target = self
+        item.action = action
+        item.representedObject = gesture
         return item
     }
 
@@ -241,7 +246,6 @@ public class MenuBarController: NSObject {
     }
 
     private func configureTapResponsivenessMenu(_ item: NSMenuItem, fingerCount: Int) {
-        item.representedObject = fingerCount
         guard let submenu = item.submenu else { return }
         submenu.delegate = self
         updateTapResponsivenessMenu(submenu, fingerCount: fingerCount)
@@ -1162,8 +1166,8 @@ extension MenuBarController: NSMenuDelegate {
         // Refresh system-setting-dependent controls whenever the submenu opens.
         guard let parent = unsafe menu.supermenu,
               let item = parent.items.first(where: { $0.submenu === menu }),
-              let fingerCount = item.representedObject as? Int else { return }
-        updateTapResponsivenessMenu(menu, fingerCount: fingerCount)
+              let gesture = item.representedObject as? GestureChoice else { return }
+        updateTapResponsivenessMenu(menu, fingerCount: gesture.fingerCount)
     }
 }
 
