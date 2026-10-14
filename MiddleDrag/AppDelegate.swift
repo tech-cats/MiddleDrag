@@ -243,7 +243,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         guard !hasShownPrompt else { return }
 
         // Only show if there are actual conflicts
-        guard SystemGestureHelper.hasConflictingSettings() else { return }
+        guard SystemGestureHelper.hasConflictingSettings(for: preferences.gestureConfig) else { return }
 
         // Delay slightly to ensure UI is ready
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
@@ -257,14 +257,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Mark as shown regardless of user action to avoid showing again
         PreferencesManager.shared.markGestureConfigurationPromptShown()
 
-        // Show prompt with first launch messaging
-        if AlertHelper.showGestureConfigurationPrompt(isFirstLaunch: true) {
-            // User chose to apply changes
-            if SystemGestureHelper.applyRecommendedSettings() {
-                AlertHelper.showGestureConfigurationSuccess()
-            } else {
-                AlertHelper.showGestureConfigurationFailure()
-            }
+        if SystemGestureHelper.hasConflictingSettings(for: preferences.gestureConfig) {
+            AlertHelper.showThreeFingerGestureCompatibilityIfNeeded()
         }
         // If user dismissed, we've already marked it as shown so it won't appear again
     }

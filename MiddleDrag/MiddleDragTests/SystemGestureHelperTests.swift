@@ -21,50 +21,27 @@ class MockTrackpadSettingsProvider: TrackpadSettingsProvider {
     }
 }
 
-/// Mock process runner for testing SystemGestureHelper
-class MockProcessRunner: ProcessRunner {
-    var executedCommands: [(executable: String, arguments: [String])] = []
-    var shouldSucceed = true
-
-    func run(executable: String, arguments: [String]) -> Bool {
-        executedCommands.append((executable, arguments))
-        return shouldSucceed
-    }
-
-    func reset() {
-        executedCommands.removeAll()
-        shouldSucceed = true
-    }
-}
-
 final class SystemGestureHelperTests: XCTestCase {
 
     var mockSettingsProvider: MockTrackpadSettingsProvider!
-    var mockProcessRunner: MockProcessRunner!
 
     // Store original providers for restoration
     var originalSettingsProvider: TrackpadSettingsProvider!
-    var originalProcessRunner: ProcessRunner!
 
     override func setUp() {
         super.setUp()
         // Save originals
         originalSettingsProvider = unsafe SystemGestureHelper.settingsProvider
-        originalProcessRunner = unsafe SystemGestureHelper.processRunner
 
         // Create and inject mocks
         mockSettingsProvider = MockTrackpadSettingsProvider()
-        mockProcessRunner = MockProcessRunner()
         unsafe SystemGestureHelper.settingsProvider = mockSettingsProvider
-        unsafe SystemGestureHelper.processRunner = mockProcessRunner
     }
 
     override func tearDown() {
         // Restore originals
         unsafe SystemGestureHelper.settingsProvider = originalSettingsProvider
-        unsafe SystemGestureHelper.processRunner = originalProcessRunner
         mockSettingsProvider = nil
-        mockProcessRunner = nil
         super.tearDown()
     }
 
@@ -96,13 +73,6 @@ final class SystemGestureHelperTests: XCTestCase {
         XCTAssertTrue(allCases.contains(.threeFingerHorizSwipe))
         XCTAssertTrue(allCases.contains(.fourFingerVertSwipe))
         XCTAssertTrue(allCases.contains(.fourFingerHorizSwipe))
-    }
-
-    // MARK: - GestureValue Tests
-
-    func testGestureValueRawValues() {
-        XCTAssertEqual(SystemGestureHelper.GestureValue.disabled.rawValue, 0)
-        XCTAssertEqual(SystemGestureHelper.GestureValue.enabled.rawValue, 2)
     }
 
     // MARK: - trackpadDomain Tests
@@ -257,115 +227,6 @@ final class SystemGestureHelperTests: XCTestCase {
         XCTAssertFalse(hasConflicts)
     }
 
-    // MARK: - recommendedSettings Tests
-
-    func testRecommendedSettingsContainsExpectedValues() {
-        let recommended = SystemGestureHelper.recommendedSettings
-
-        XCTAssertEqual(recommended.count, 4)
-
-        // Check 3-finger gestures are disabled
-        let threeFingerVert = recommended.first { $0.0 == .threeFingerVertSwipe }
-        XCTAssertNotNil(threeFingerVert)
-        XCTAssertEqual(threeFingerVert?.1, .disabled)
-
-        let threeFingerHoriz = recommended.first { $0.0 == .threeFingerHorizSwipe }
-        XCTAssertNotNil(threeFingerHoriz)
-        XCTAssertEqual(threeFingerHoriz?.1, .disabled)
-
-        // Check 4-finger gestures are enabled
-        let fourFingerVert = recommended.first { $0.0 == .fourFingerVertSwipe }
-        XCTAssertNotNil(fourFingerVert)
-        XCTAssertEqual(fourFingerVert?.1, .enabled)
-
-        let fourFingerHoriz = recommended.first { $0.0 == .fourFingerHorizSwipe }
-        XCTAssertNotNil(fourFingerHoriz)
-        XCTAssertEqual(fourFingerHoriz?.1, .enabled)
-    }
-
-    // MARK: - applyRecommendedSettings Tests
-
-    func testApplyRecommendedSettingsExecutesCorrectCommands() {
-        mockProcessRunner.shouldSucceed = true
-
-        let success = SystemGestureHelper.applyRecommendedSettings()
-
-        XCTAssertTrue(success)
-        // Should have 4 defaults write commands + 1 killall Dock
-        XCTAssertEqual(mockProcessRunner.executedCommands.count, 5)
-
-        // Check the defaults write commands
-        for i in 0..<4 {
-            XCTAssertEqual(mockProcessRunner.executedCommands[i].executable, "/usr/bin/defaults")
-            XCTAssertEqual(mockProcessRunner.executedCommands[i].arguments[0], "write")
-            XCTAssertEqual(
-                mockProcessRunner.executedCommands[i].arguments[1],
-                SystemGestureHelper.trackpadDomain)
-        }
-
-        // Check killall Dock command
-        XCTAssertEqual(mockProcessRunner.executedCommands[4].executable, "/usr/bin/killall")
-        XCTAssertEqual(mockProcessRunner.executedCommands[4].arguments, ["Dock"])
-    }
-
-    func testApplyRecommendedSettingsReturnsFalseOnFailure() {
-        mockProcessRunner.shouldSucceed = false
-
-        let success = SystemGestureHelper.applyRecommendedSettings()
-
-        XCTAssertFalse(success)
-        // Should have 4 defaults write commands but no killall (fails before dock restart)
-        XCTAssertEqual(mockProcessRunner.executedCommands.count, 4)
-    }
-
-    func testApplyRecommendedSettingsWritesCorrectValues() {
-        mockProcessRunner.shouldSucceed = true
-
-        _ = SystemGestureHelper.applyRecommendedSettings()
-
-        // Extract the values written
-        let writtenValues = mockProcessRunner.executedCommands.prefix(4).map {
-            cmd -> (String, String) in
-            let key = cmd.arguments[2]
-            let value = cmd.arguments[4]
-            return (key, value)
-        }
-
-        // Verify 3-finger gestures are set to 0 (disabled)
-        let threeFingerVertCmd = writtenValues.first {
-            $0.0 == SystemGestureHelper.TrackpadKey.threeFingerVertSwipe.rawValue
-        }
-        XCTAssertEqual(threeFingerVertCmd?.1, "0")
-
-        let threeFingerHorizCmd = writtenValues.first {
-            $0.0 == SystemGestureHelper.TrackpadKey.threeFingerHorizSwipe.rawValue
-        }
-        XCTAssertEqual(threeFingerHorizCmd?.1, "0")
-
-        // Verify 4-finger gestures are set to 2 (enabled)
-        let fourFingerVertCmd = writtenValues.first {
-            $0.0 == SystemGestureHelper.TrackpadKey.fourFingerVertSwipe.rawValue
-        }
-        XCTAssertEqual(fourFingerVertCmd?.1, "2")
-
-        let fourFingerHorizCmd = writtenValues.first {
-            $0.0 == SystemGestureHelper.TrackpadKey.fourFingerHorizSwipe.rawValue
-        }
-        XCTAssertEqual(fourFingerHorizCmd?.1, "2")
-    }
-
-    // MARK: - restartDock Tests
-
-    func testRestartDockExecutesKillallCommand() {
-        mockProcessRunner.reset()
-
-        SystemGestureHelper.restartDock()
-
-        XCTAssertEqual(mockProcessRunner.executedCommands.count, 1)
-        XCTAssertEqual(mockProcessRunner.executedCommands[0].executable, "/usr/bin/killall")
-        XCTAssertEqual(mockProcessRunner.executedCommands[0].arguments, ["Dock"])
-    }
-
     // MARK: - describeCurrentSettings Tests
 
     func testDescribeCurrentSettingsWhenAllDisabled() {
@@ -489,11 +350,6 @@ final class SystemGestureHelperTests: XCTestCase {
     func testDefaultTrackpadSettingsProviderExists() {
         let provider = DefaultTrackpadSettingsProvider()
         XCTAssertNotNil(provider)
-    }
-
-    func testDefaultProcessRunnerExists() {
-        let runner = DefaultProcessRunner()
-        XCTAssertNotNil(runner)
     }
 
     // MARK: - describeConflictingSettings Tests

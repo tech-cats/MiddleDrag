@@ -375,10 +375,10 @@ public class MenuBarController: NSObject {
         let item = NSMenuItem(title: "Advanced", action: nil, keyEquivalent: "")
         let submenu = NSMenu()
 
-        // Add system gesture configuration option
+        // Check compatibility of the currently enabled gestures.
         let gestureItem = NSMenuItem(
-            title: "Configure System Gestures...",
-            action: #selector(configureSystemGestures),
+            title: "Check for Conflicting System Gestures...",
+            action: #selector(checkForConflictingSystemGestures),
             keyEquivalent: ""
         )
         gestureItem.target = self
@@ -709,6 +709,10 @@ public class MenuBarController: NSObject {
     @objc func toggleMiddleDrag() {
         preferences.middleDragEnabled.toggle()
         applyGesturePreferences()
+        if preferences.middleDragEnabled {
+            NSApp.activate(ignoringOtherApps: true)
+            AlertHelper.showThreeFingerGestureCompatibilityIfNeeded()
+        }
     }
 
     @objc func toggleTapToClick() {
@@ -719,6 +723,10 @@ public class MenuBarController: NSObject {
     @objc func toggleTapToDrag() {
         preferences.tapToDragEnabled.toggle()
         applyGesturePreferences()
+        if preferences.tapToDragEnabled {
+            NSApp.activate(ignoringOtherApps: true)
+            AlertHelper.showThreeFingerGestureCompatibilityIfNeeded()
+        }
     }
 
     private func modifyLowFingerSettings(_ fingerCount: Int, _ update: (inout FingerTapConfiguration) -> Void) {
@@ -839,21 +847,9 @@ public class MenuBarController: NSObject {
         NotificationCenter.default.post(name: .preferencesChanged, object: preferences)
     }
 
-    @objc func configureSystemGestures() {
-        // Check if settings are already optimal
-        if !SystemGestureHelper.hasConflictingSettings() {
-            AlertHelper.showGestureConfigurationAlreadyOptimal()
-            return
-        }
-
-        // Show prompt and apply if user confirms
-        if AlertHelper.showGestureConfigurationPrompt() {
-            if SystemGestureHelper.applyRecommendedSettings() {
-                AlertHelper.showGestureConfigurationSuccess()
-            } else {
-                AlertHelper.showGestureConfigurationFailure()
-            }
-        }
+    @objc func checkForConflictingSystemGestures() {
+        NSApp.activate(ignoringOtherApps: true)
+        AlertHelper.showSystemGestureConflicts(configuration: preferences.gestureConfig)
     }
     
     @objc func rebindToggleHotKey() {

@@ -2,17 +2,22 @@ import XCTest
 
 @testable import MiddleDragCore
 
-@MainActor @unsafe final class MenuBarControllerTests: XCTestCase {
+@MainActor @unsafe final class MenuBarControllerTests: XCTestCase, @unchecked Sendable {
 
     var mockDevice: MockDeviceMonitor!
     var manager: MultitouchManager!
     var preferences: UserPreferences!
     var controller: MenuBarController!
+    var originalAlertPresenter: AlertPresenter!
     var notificationExpectation: XCTestExpectation?
     var receivedNotificationObject: Any?
 
     override func setUpWithError() throws {
         try super.setUpWithError()
+        MainActor.assumeIsolated {
+            originalAlertPresenter = AlertHelper.presenter
+            AlertHelper.presenter = MockAlertPresenter()
+        }
         unsafe mockDevice = unsafe MockDeviceMonitor()
         unsafe manager = MultitouchManager(
             deviceProviderFactory: { unsafe self.mockDevice }, eventTapSetup: { true })
@@ -21,6 +26,10 @@ import XCTest
     }
 
     override func tearDown() {
+        MainActor.assumeIsolated {
+            AlertHelper.presenter = originalAlertPresenter
+            originalAlertPresenter = nil
+        }
         unsafe NotificationCenter.default.removeObserver(self)
         unsafe manager.stop()
         unsafe controller = nil
@@ -547,14 +556,14 @@ import XCTest
         ctrl.buildMenu()  // Should include relift option
     }
 
-    // MARK: - Configure System Gestures Tests
+    // MARK: - Check for Conflicting System Gestures Tests
 
-    // Note: We cannot directly test configureSystemGestures as it calls AlertHelper
+    // Note: We cannot directly test checkForConflictingSystemGestures as it calls AlertHelper
     // methods. However, we CAN verify the method exists and is callable with proper mocking.
 
-    func testConfigureSystemGesturesMethodExists() {
+    func testCheckForConflictingSystemGesturesMethodExists() {
         // Verify the selector exists
-        let selector = #selector(MenuBarController.configureSystemGestures)
+        let selector = #selector(MenuBarController.checkForConflictingSystemGestures)
         unsafe XCTAssertTrue(controller.responds(to: selector))
     }
 

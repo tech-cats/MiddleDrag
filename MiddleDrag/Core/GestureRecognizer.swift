@@ -298,7 +298,7 @@ class GestureRecognizer: @unchecked Sendable {
         if !sessionOpen {
             guard count > 0 else { return }
             // Read once per new session, including progressive 1 -> 2 landing.
-            // System settings can be changed while this experiment is running.
+            // System settings can be changed while MiddleDrag is running.
             contactSmartZoomEnabled = configuration.twoFingerTaps.tapToClickEnabled
                 && SystemGestureHelper.isSmartZoomEnabled()
             sessionOpen = true
