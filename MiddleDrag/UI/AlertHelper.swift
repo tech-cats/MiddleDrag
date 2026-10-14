@@ -30,6 +30,12 @@ public class AlertHelper {
     /// Injectable presenter for testing
     static var presenter: AlertPresenter = DefaultAlertPresenter()
 
+    enum NativeTapCaveat {
+        case oneFingerTapToDrag
+        case twoFingerTapToClick
+        case twoFingerTapToDrag
+    }
+
     // MARK: - Alert Configuration (Testable)
 
     /// Creates and returns a configured About alert without presenting it
@@ -169,6 +175,64 @@ public class AlertHelper {
         return alert
     }
 
+    static func createSmartZoomCompatibilityAlert(button: GestureMouseButton) -> NSAlert {
+        let alert = NSAlert()
+        alert.messageText = "Caveats on compatibility with Smart Zoom"
+        alert.informativeText = """
+            You may notice a little delay before \(button.displayName.lowercased()) button clicks after tapping with two fingers, when "Smart Zoom" is enabled in system trackpad settings.
+
+            MiddleDrag needs to determine whether the gesture is a 2-finger double tap, so it doesn't generate two clicks while you intend to do Smart Zoom. We can't guess if you want a double tap as soon as you lift your fingers for the first tap, so the click has to come after a timeout.
+            """
+
+        let settingsPath = "System Settings → Trackpad → Scroll & Zoom"
+        let guidance = "If you want more responsive clicks or if you do need double click from double tap, turn off Smart Zoom in \(settingsPath) tab."
+        alert.accessoryView = createSettingsGuidance(guidance, settingsPath: settingsPath)
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "OK")
+        return alert
+    }
+
+    static func createNativeTapCompatibilityAlert(_ caveat: NativeTapCaveat) -> NSAlert {
+        let alert = NSAlert()
+        let settingsPath = "System Settings → Trackpad → Point & Click tab"
+        let guidance: String
+        switch caveat {
+        case .oneFingerTapToDrag:
+            alert.messageText = "1-finger Tap to Drag Compatibility"
+            alert.informativeText = "You have \"Tap to click\" enabled in system trackpad settings. The first tap of a tap-to-drag gesture will natively generate a click event, which means a real click will always precede your dragging."
+            guidance = "If you don't want this, turn off \"Tap to click\" in \(settingsPath) and use MiddleDrag's Tap to Click options instead."
+        case .twoFingerTapToClick:
+            alert.messageText = "2-finger Tap to Click Compatibility"
+            alert.informativeText = "You have \"Secondary click\" set to \"Click or Tap with Two Fingers\" in system trackpad settings. A 2-finger tap will generate duplicate clicks from MiddleDrag and the system."
+            guidance = "Set \"Secondary click\" to another option or turn off \"Tap to click\" in \(settingsPath) to use MiddleDrag's event exclusively."
+        case .twoFingerTapToDrag:
+            alert.messageText = "2-finger Tap to Drag Compatibility"
+            alert.informativeText = "You have \"Secondary click\" set to \"Click or Tap with Two Fingers\" in system trackpad settings. The first tap of a tap-to-drag gesture will natively generate a right click event, which means a real right click will always precede your dragging."
+            guidance = "If you don't want this, set \"Secondary click\" to another option or turn off \"Tap to click\" in \(settingsPath) and use MiddleDrag's Tap to Click options instead."
+        }
+        alert.accessoryView = createSettingsGuidance(guidance, settingsPath: settingsPath)
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "OK")
+        return alert
+    }
+
+    private static func createSettingsGuidance(_ guidance: String, settingsPath: String) -> NSTextField {
+        let attributedGuidance = NSMutableAttributedString(string: guidance, attributes: [
+            .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        ])
+        attributedGuidance.addAttribute(.font,
+            value: NSFont.boldSystemFont(ofSize: NSFont.smallSystemFontSize),
+            range: (guidance as NSString).range(of: settingsPath))
+        let label = NSTextField(wrappingLabelWithString: guidance)
+        label.attributedStringValue = attributedGuidance
+        label.preferredMaxLayoutWidth = 420
+        label.frame.size = NSSize(width: 420,
+            height: ceil(attributedGuidance.boundingRect(
+                with: NSSize(width: 420, height: CGFloat.greatestFiniteMagnitude),
+                options: [.usesLineFragmentOrigin, .usesFontLeading]).height) + 4)
+        return label
+    }
+
     // MARK: - URL Constants
 
     /// GitHub project URL
@@ -195,6 +259,14 @@ public class AlertHelper {
         if presenter.runModal(alert) == .alertSecondButtonReturn {
             openTrackpadSettings()
         }
+    }
+
+    static func showSmartZoomCompatibility(button: GestureMouseButton) {
+        _ = presenter.runModal(createSmartZoomCompatibilityAlert(button: button))
+    }
+
+    static func showNativeTapCompatibility(_ caveat: NativeTapCaveat) {
+        _ = presenter.runModal(createNativeTapCompatibilityAlert(caveat))
     }
 
     /// Show dialog for configuring system gestures when they're already optimal

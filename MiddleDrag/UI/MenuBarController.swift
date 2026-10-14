@@ -28,6 +28,7 @@ public class MenuBarController: NSObject {
         case middleDrag = 3
         case tapToClick = 4
         case tapToDrag = 5
+        case tapResponsiveness = 6
     }
 
     // MARK: - Initialization
@@ -220,10 +221,12 @@ public class MenuBarController: NSObject {
     }
 
     private func createTapToClickItem() -> NSMenuItem {
-        createGestureMenu(title: "3-finger Tap to Click", gesture: .tap,
-                          enabled: preferences.tapToClickEnabled,
-                          button: preferences.tapButton,
-                          action: #selector(toggleTapToClick), tag: .tapToClick)
+        let item = createGestureMenu(title: "3-finger Tap to Click", gesture: .tap,
+                                     enabled: preferences.tapToClickEnabled,
+                                     button: preferences.tapButton,
+                                     action: #selector(toggleTapToClick), tag: .tapToClick)
+        configureTapResponsivenessMenu(item, fingerCount: 3)
+        return item
     }
 
     private func createLowFingerTapToClickItem(fingerCount: Int) -> NSMenuItem {
@@ -233,7 +236,45 @@ public class MenuBarController: NSObject {
                                      enabled: settings.tapToClickEnabled, button: settings.tapButton,
                                      action: #selector(toggleLowFingerGesture(_:)))
         item.submenu?.items.first?.representedObject = gesture
+        configureTapResponsivenessMenu(item, fingerCount: fingerCount)
         return item
+    }
+
+    private func configureTapResponsivenessMenu(_ item: NSMenuItem, fingerCount: Int) {
+        item.representedObject = fingerCount
+        guard let submenu = item.submenu else { return }
+        submenu.delegate = self
+        updateTapResponsivenessMenu(submenu, fingerCount: fingerCount)
+    }
+
+    private func updateTapResponsivenessMenu(_ menu: NSMenu, fingerCount: Int) {
+        for item in menu.items where item.tag == MenuItemTag.tapResponsiveness.rawValue {
+            menu.removeItem(item)
+        }
+        let separator = NSMenuItem.separator()
+        separator.tag = MenuItemTag.tapResponsiveness.rawValue
+        menu.addItem(separator)
+
+        if fingerCount == 2 && SystemGestureHelper.isSmartZoomEnabled() {
+            let caveats = createMenuItem(title: "Caveats on compatibility with Smart Zoom",
+                                         action: #selector(showSmartZoomCompatibility))
+            caveats.tag = MenuItemTag.tapResponsiveness.rawValue
+            menu.addItem(caveats)
+            return
+        }
+
+        let settings = preferences.gestureConfig.tapConfiguration(for: fingerCount)
+        let immediatePress = createMenuItem(title: "Press Button on First Tap Release",
+                                            action: #selector(toggleTapToDragImmediatePress(_:)))
+        immediatePress.representedObject = fingerCount
+        immediatePress.state = settings.tapToDragImmediatePress ? .on : .off
+        immediatePress.tag = MenuItemTag.tapResponsiveness.rawValue
+        menu.addItem(immediatePress)
+        let explanation = NSMenuItem(title: "Early press requires matching tap and drag buttons",
+                                      action: nil, keyEquivalent: "")
+        explanation.isEnabled = false
+        explanation.tag = MenuItemTag.tapResponsiveness.rawValue
+        menu.addItem(explanation)
     }
 
     private func createTapToDragItem(fingerCount: Int = 3) -> NSMenuItem {
@@ -264,15 +305,6 @@ public class MenuBarController: NSObject {
         choices.addItem(custom)
         timeout.submenu = choices
         item.submenu?.addItem(timeout)
-        let immediatePress = createMenuItem(title: "Press Button on First Tap Release",
-                                            action: #selector(toggleTapToDragImmediatePress(_:)))
-        immediatePress.representedObject = fingerCount
-        immediatePress.state = settings.tapToDragImmediatePress ? .on : .off
-        item.submenu?.addItem(immediatePress)
-        let explanation = NSMenuItem(title: "Early press requires matching tap and drag buttons",
-                                      action: nil, keyEquivalent: "")
-        explanation.isEnabled = false
-        item.submenu?.addItem(explanation)
         return item
     }
 
@@ -697,6 +729,29 @@ public class MenuBarController: NSObject {
             else { $0.tapToDragEnabled.toggle() }
         }
         applyGesturePreferences()
+        showNativeTapCompatibilityIfNeeded(for: gesture)
+    }
+
+    private func showNativeTapCompatibilityIfNeeded(for gesture: GestureChoice) {
+        let settings = preferences.gestureConfig.tapConfiguration(for: gesture.fingerCount)
+        guard gesture.isTap ? settings.tapToClickEnabled : settings.tapToDragEnabled else { return }
+
+        let caveat: AlertHelper.NativeTapCaveat
+        switch gesture {
+        case .oneFingerDrag:
+            guard SystemGestureHelper.isTapToClickEnabled() else { return }
+            caveat = .oneFingerTapToDrag
+        case .twoFingerTap:
+            guard SystemGestureHelper.isTwoFingerSecondaryTapEnabled() else { return }
+            caveat = .twoFingerTapToClick
+        case .twoFingerDrag:
+            guard SystemGestureHelper.isTwoFingerSecondaryTapEnabled() else { return }
+            caveat = .twoFingerTapToDrag
+        default:
+            return
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        AlertHelper.showNativeTapCompatibility(caveat)
     }
 
     @objc private func toggleTapToDragImmediatePress(_ sender: NSMenuItem) {
@@ -704,6 +759,11 @@ public class MenuBarController: NSObject {
         if fingerCount == 3 { preferences.tapToDragImmediatePress.toggle() }
         else { modifyLowFingerSettings(fingerCount) { $0.tapToDragImmediatePress.toggle() } }
         applyGesturePreferences()
+    }
+
+    @objc private func showSmartZoomCompatibility() {
+        NSApp.activate(ignoringOtherApps: true)
+        AlertHelper.showSmartZoomCompatibility(button: preferences.twoFingerTaps.tapButton)
     }
 
     @objc private func setGestureButton(_ sender: NSMenuItem) {
@@ -1094,6 +1154,16 @@ public class MenuBarController: NSObject {
                 button.performClick(nil)
             }
         }
+    }
+}
+
+extension MenuBarController: NSMenuDelegate {
+    public func menuNeedsUpdate(_ menu: NSMenu) {
+        // Refresh system-setting-dependent controls whenever the submenu opens.
+        guard let parent = unsafe menu.supermenu,
+              let item = parent.items.first(where: { $0.submenu === menu }),
+              let fingerCount = item.representedObject as? Int else { return }
+        updateTapResponsivenessMenu(menu, fingerCount: fingerCount)
     }
 }
 

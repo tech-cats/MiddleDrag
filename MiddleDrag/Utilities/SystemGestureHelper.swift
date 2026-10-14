@@ -40,7 +40,7 @@ class DefaultProcessRunner: ProcessRunner {
 }
 
 /// Helper for detecting and configuring macOS system gesture settings
-/// to prevent conflicts with MiddleDrag's three-finger gestures.
+/// to detect conflicts with MiddleDrag's gestures.
 public class SystemGestureHelper {
 
     // MARK: - Dependency Injection
@@ -82,6 +82,23 @@ public class SystemGestureHelper {
         let key = "TrackpadTwoFingerDoubleTapGesture"
         return [trackpadDomain, bluetoothTrackpadDomain].contains { domain in
             (unsafe settingsProvider.getSetting(forKey: key, domain: domain) ?? 0) != 0
+        }
+    }
+
+    static func isTapToClickEnabled() -> Bool {
+        [trackpadDomain, bluetoothTrackpadDomain].contains { domain in
+            (unsafe settingsProvider.getSetting(forKey: "Clicking", domain: domain) ?? 0) != 0
+        }
+    }
+
+    /// All conditions must hold in the same device domain. Corner secondary
+    /// clicks do not generate the native two-finger tap this caveat describes.
+    static func isTwoFingerSecondaryTapEnabled() -> Bool {
+        [trackpadDomain, bluetoothTrackpadDomain].contains { domain in
+            let tapping = unsafe settingsProvider.getSetting(forKey: "Clicking", domain: domain) ?? 0
+            let secondaryClick = unsafe settingsProvider.getSetting(forKey: "TrackpadRightClick", domain: domain) ?? 0
+            let secondaryCorner = unsafe settingsProvider.getSetting(forKey: "TrackpadCornerSecondaryClick", domain: domain) ?? 0
+            return tapping != 0 && secondaryClick != 0 && secondaryCorner == 0
         }
     }
 
