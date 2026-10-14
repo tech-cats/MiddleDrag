@@ -28,6 +28,44 @@ final class MouseEventGenerator: @unchecked Sendable {
     // Captured for the whole session; preferences may change before release.
     private var _activeButton: GestureMouseButton = .middle
     private var activeButton: GestureMouseButton { stateLock.withLock { _activeButton } }
+    private var _activePressClickCount: Int64 = 1
+    private var activePressClickCount: Int64 { stateLock.withLock { _activePressClickCount } }
+
+    // Quartz does not infer multi-click counts for our private event source.
+    // Use tap recognition times so a deferred second click retains its meaning.
+    private struct ClickSequence {
+        let button: GestureMouseButton
+        let position: CGPoint
+        let modifiers: CGEventFlags
+        let timestamp: CFTimeInterval
+        let count: Int64
+    }
+    private let clickSequenceLock = NSLock()
+    private var lastTapClick: ClickSequence?
+
+    private func nextTapClickCount(button: GestureMouseButton, at position: CGPoint,
+                                  modifiers: CGEventFlags, timestamp: CFTimeInterval) -> Int64 {
+        clickSequenceLock.withLock {
+            let keyModifiers = modifiers.intersection([
+                .maskShift, .maskControl, .maskAlternate, .maskCommand, .maskAlphaShift, .maskSecondaryFn,
+            ])
+            var count: Int64 = 1
+            if let previous = lastTapClick,
+               previous.button == button, previous.modifiers == keyModifiers,
+               timestamp >= previous.timestamp,
+               timestamp - previous.timestamp <= NSEvent.doubleClickInterval,
+               hypot(position.x - previous.position.x, position.y - previous.position.y) <= 4 {
+                count = previous.count + 1
+            }
+            lastTapClick = ClickSequence(button: button, position: position, modifiers: keyModifiers,
+                                         timestamp: timestamp, count: count)
+            return count
+        }
+    }
+
+    private func resetTapClickSequence() {
+        clickSequenceLock.withLock { lastTapClick = nil }
+    }
 
     private var isMouseButtonDown: Bool {
         get { stateLock.withLock { _isMouseButtonDown } }
@@ -120,22 +158,60 @@ final class MouseEventGenerator: @unchecked Sendable {
 
     // MARK: - Public Interface
 
+    /// Freeze native pointer movement while a low-finger second contact is still
+    /// deciding tap versus drag. This does not press a button or move the cursor.
+    func freezeCursorForCandidate() {
+        eventQueue.sync {
+            guard shouldPostEvents else { return }
+            let error = CGAssociateMouseAndMouseCursorPosition(0)
+            if error != .success {
+                Log.warning("Failed to freeze candidate cursor: \(error.rawValue)", category: .gesture)
+            }
+            eventSource?.localEventsSuppressionInterval = 0
+        }
+    }
+
+    /// Candidates without an early press still need cursor cleanup on release.
+    func resumeCursorAfterCandidate() {
+        eventQueue.sync { stateLock.withLock { reassociateCursor() } }
+    }
+
+    /// Restore native clicks withheld by a candidate that ended as a short tap.
+    /// Preserve their native click count and modifiers; tag them to bypass our tap.
+    func replayNativeClicks(_ events: [CGEvent]) {
+        eventQueue.sync {
+            guard shouldPostEvents else { return }
+            eventSource?.localEventsSuppressionInterval = 0
+            for event in events {
+                event.setIntegerValueField(.eventSourceUserData, value: magicUserData)
+                GestureEventRecorder.shared.record("click.native_replayed",
+                    "type=\(event.type.rawValue) click_count=\(event.getIntegerValueField(.mouseEventClickState))")
+                event.post(tap: .cghidEventTap)
+            }
+        }
+    }
+
     /// Hold the button while a tap waits for a possible second contact. Cursor
     /// association stays unchanged until the contact actually becomes a drag.
     /// The recognizer owns the timeout and cancellation of this pending press.
     @discardableResult
-    func pressButton(at position: CGPoint, button: GestureMouseButton) -> Bool {
+    func pressButton(at position: CGPoint, button: GestureMouseButton,
+                     clickTimestamp: CFTimeInterval? = nil) -> Bool {
         eventQueue.sync {
             guard !isMouseButtonDown else { return false }
             stopWatchdog()
+            let clickCount = nextTapClickCount(button: button, at: position,
+                                              modifiers: currentModifierFlags,
+                                              timestamp: clickTimestamp ?? CACurrentMediaTime())
             stateLock.withLock {
                 _isMouseButtonDown = true
                 _activeButton = button
+                _activePressClickCount = clickCount
                 _dragGeneration &+= 1
             }
             eventSource?.localEventsSuppressionInterval = 0
             GestureEventRecorder.shared.record("button.pending_press", "button=\(button.rawValue)")
-            sendMouseDown(at: position, button: button)
+            sendMouseDown(at: position, button: button, clickCount: clickCount)
             return true
         }
     }
@@ -155,6 +231,7 @@ final class MouseEventGenerator: @unchecked Sendable {
     private func startDragLocked(at screenPosition: CGPoint, button: GestureMouseButton,
                                  allowStationaryHold: Bool, continuingButtonHold: Bool) {
         stopWatchdog()
+        resetTapClickSequence()
         let continuesHeldButton = stateLock.withLock {
             continuingButtonHold && _isMouseButtonDown && _activeButton == button
         }
@@ -163,6 +240,7 @@ final class MouseEventGenerator: @unchecked Sendable {
         // so watchdog force-release cannot win a race and reassociate after we
         // disassociate for the new drag.
         let previousButton = activeButton
+        let previousClickCount = activePressClickCount
         let recoveredExistingDrag = stateLock.withLock {
             guard _isMouseButtonDown && !continuesHeldButton else { return false }
             reassociateCursor()
@@ -174,7 +252,7 @@ final class MouseEventGenerator: @unchecked Sendable {
             Log.warning("startDrag called while already dragging - canceling existing drag first", category: .gesture)
             // Send mouse up for the existing drag immediately (synchronously)
             let currentPos = currentMouseLocationQuartz
-            sendMouseUp(at: currentPos, button: previousButton)
+            sendMouseUp(at: currentPos, button: previousButton, clickCount: previousClickCount)
         }
         
         let quartzPos = currentMouseLocationQuartz
@@ -220,12 +298,13 @@ final class MouseEventGenerator: @unchecked Sendable {
         stateLock.withLock {
             _isMouseButtonDown = true
             _activeButton = button
+            if !continuesHeldButton { _activePressClickCount = 1 }
             _dragGeneration &+= 1
         }
         let generation = stateLock.withLock { _dragGeneration }
         GestureEventRecorder.shared.record("button.hold_started",
             "generation=\(generation) button=\(button.rawValue) stationary_hold=\(allowStationaryHold) continuing_press=\(continuesHeldButton)")
-        if !continuesHeldButton { sendMouseDown(at: quartzPos, button: button) }
+        if !continuesHeldButton { sendMouseDown(at: quartzPos, button: button, clickCount: 1) }
         
         // Start watchdog timer to detect stuck drags
         // Intentional tap-to-drag holds may remain stationary indefinitely.
@@ -299,6 +378,7 @@ final class MouseEventGenerator: @unchecked Sendable {
         event.setIntegerValueField(.mouseEventDeltaY, value: Int64(smoothedDeltaY.rounded()))
         
         event.setIntegerValueField(.mouseEventButtonNumber, value: button.buttonNumber)
+        event.setIntegerValueField(.mouseEventClickState, value: activePressClickCount)
         event.setIntegerValueField(.eventSourceUserData, value: magicUserData)
         event.flags = currentModifierFlags
         event.post(tap: .cghidEventTap)
@@ -311,6 +391,7 @@ final class MouseEventGenerator: @unchecked Sendable {
     func endDrag() {
         guard isMouseButtonDown else { return }
         let button = activeButton
+        let pressClickCount = activePressClickCount
         GestureEventRecorder.shared.record("button.hold_ended", "button=\(button.rawValue) reason=release")
         
         // Stop watchdog since drag is ending normally
@@ -332,7 +413,7 @@ final class MouseEventGenerator: @unchecked Sendable {
             self.previousDeltaX = 0
             self.previousDeltaY = 0
             let currentPos = self.currentMouseLocationQuartz
-            self.sendMouseUp(at: currentPos, button: button)
+            self.sendMouseUp(at: currentPos, button: button, clickCount: pressClickCount)
         }
     }
 
@@ -341,7 +422,7 @@ final class MouseEventGenerator: @unchecked Sendable {
     /// This method handles the edge case where rapid taps might leave the button stuck.
     func performClick(button: GestureMouseButton = .middle, at position: CGPoint? = nil,
                       deduplicate: Bool = true, source: String = "unspecified",
-                      contactID: UInt64 = 0) {
+                      contactID: UInt64 = 0, clickTimestamp: CFTimeInterval? = nil) {
         let requestID = stateLock.withLock {
             _clickRequestGeneration &+= 1
             return _clickRequestGeneration
@@ -392,7 +473,6 @@ final class MouseEventGenerator: @unchecked Sendable {
                 return
             }
 
-            downEvent.setIntegerValueField(.mouseEventClickState, value: 1)
             downEvent.setIntegerValueField(.mouseEventButtonNumber, value: button.buttonNumber)
             downEvent.setIntegerValueField(.eventSourceUserData, value: self.magicUserData)
             downEvent.flags = self.currentModifierFlags
@@ -410,7 +490,6 @@ final class MouseEventGenerator: @unchecked Sendable {
                 return
             }
 
-            upEvent.setIntegerValueField(.mouseEventClickState, value: 1)
             upEvent.setIntegerValueField(.mouseEventButtonNumber, value: button.buttonNumber)
             upEvent.setIntegerValueField(.eventSourceUserData, value: self.magicUserData)
 
@@ -420,12 +499,16 @@ final class MouseEventGenerator: @unchecked Sendable {
                 GestureEventRecorder.shared.record("click.skipped", "request=\(requestID) reason=CI")
                 return
             }
+            let clickCount = self.nextTapClickCount(button: button, at: clickLocation,
+                modifiers: downEvent.flags, timestamp: clickTimestamp ?? now)
+            downEvent.setIntegerValueField(.mouseEventClickState, value: clickCount)
+            upEvent.setIntegerValueField(.mouseEventClickState, value: clickCount)
             GestureEventRecorder.shared.record("click.down_posted",
-                "request=\(requestID) source=\(source) contact=\(contactID) button=\(button.rawValue) flags=\(downEvent.flags.rawValue)")
+                "request=\(requestID) source=\(source) contact=\(contactID) button=\(button.rawValue) flags=\(downEvent.flags.rawValue) click_count=\(clickCount)")
             downEvent.post(tap: .cghidEventTap)
             usleep(10000)  // 10ms delay
             upEvent.flags = self.currentModifierFlags
-            GestureEventRecorder.shared.record("click.up_posted", "request=\(requestID) button=\(button.rawValue) flags=\(upEvent.flags.rawValue)")
+            GestureEventRecorder.shared.record("click.up_posted", "request=\(requestID) button=\(button.rawValue) flags=\(upEvent.flags.rawValue) click_count=\(clickCount)")
             upEvent.post(tap: .cghidEventTap)
         }
     }
@@ -434,6 +517,8 @@ final class MouseEventGenerator: @unchecked Sendable {
     func cancelDrag() {
         guard isMouseButtonDown else { return }
         let button = activeButton
+        let pressClickCount = activePressClickCount
+        resetTapClickSequence()
         GestureEventRecorder.shared.record("button.hold_ended", "button=\(button.rawValue) reason=cancel")
         
         // Stop watchdog since drag is being cancelled
@@ -457,7 +542,7 @@ final class MouseEventGenerator: @unchecked Sendable {
             self.previousDeltaX = 0
             self.previousDeltaY = 0
             let currentPos = self.currentMouseLocationQuartz
-            self.sendMouseUp(at: currentPos, button: button)
+            self.sendMouseUp(at: currentPos, button: button, clickCount: pressClickCount)
         }
     }
     
@@ -468,6 +553,8 @@ final class MouseEventGenerator: @unchecked Sendable {
     /// Used for manual recovery when system state may be out of sync with tracking.
     func forceMouseUp() {
         let button = activeButton
+        let pressClickCount = activePressClickCount
+        resetTapClickSequence()
         Log.warning("Force releasing mouse button (unconditional)", category: .gesture)
         
         // Stop watchdog if running
@@ -484,7 +571,7 @@ final class MouseEventGenerator: @unchecked Sendable {
         
         // Always send the UP event synchronously
         let pos = currentMouseLocationQuartz
-        sendMouseUp(at: pos, button: button)
+        sendMouseUp(at: pos, button: button, clickCount: pressClickCount)
         
         // Also send async as fallback (in case sync was swallowed)
         eventQueue.async { [weak self] in
@@ -498,7 +585,7 @@ final class MouseEventGenerator: @unchecked Sendable {
             self.previousDeltaY = 0
             
             let pos = self.currentMouseLocationQuartz
-            self.sendMouseUp(at: pos, button: button)
+            self.sendMouseUp(at: pos, button: button, clickCount: pressClickCount)
         }
     }
 
@@ -604,7 +691,7 @@ final class MouseEventGenerator: @unchecked Sendable {
 
     // MARK: - Private Methods
 
-    private func sendMouseDown(at location: CGPoint, button: GestureMouseButton) {
+    private func sendMouseDown(at location: CGPoint, button: GestureMouseButton, clickCount: Int64) {
         GestureEventRecorder.shared.record("button.down_requested", "button=\(button.rawValue) posting_enabled=\(shouldPostEvents)")
         guard shouldPostEvents else { return }
         guard
@@ -616,15 +703,15 @@ final class MouseEventGenerator: @unchecked Sendable {
             )
         else { return }
 
-        event.setIntegerValueField(.mouseEventClickState, value: 1)
+        event.setIntegerValueField(.mouseEventClickState, value: clickCount)
         event.setIntegerValueField(.mouseEventButtonNumber, value: button.buttonNumber)
         event.setIntegerValueField(.eventSourceUserData, value: magicUserData)
         event.flags = currentModifierFlags
-        GestureEventRecorder.shared.record("button.edge_posted", "type=\(event.type.rawValue) button=\(button.rawValue) flags=\(event.flags.rawValue)")
+        GestureEventRecorder.shared.record("button.edge_posted", "type=\(event.type.rawValue) button=\(button.rawValue) flags=\(event.flags.rawValue) click_count=\(clickCount)")
         event.post(tap: .cghidEventTap)
     }
 
-    private func sendMouseUp(at location: CGPoint, button: GestureMouseButton) {
+    private func sendMouseUp(at location: CGPoint, button: GestureMouseButton, clickCount: Int64) {
         GestureEventRecorder.shared.record("button.up_requested", "button=\(button.rawValue) posting_enabled=\(shouldPostEvents)")
         guard shouldPostEvents else { return }
         guard
@@ -636,11 +723,11 @@ final class MouseEventGenerator: @unchecked Sendable {
             )
         else { return }
 
-        event.setIntegerValueField(.mouseEventClickState, value: 1)
+        event.setIntegerValueField(.mouseEventClickState, value: clickCount)
         event.setIntegerValueField(.mouseEventButtonNumber, value: button.buttonNumber)
         event.setIntegerValueField(.eventSourceUserData, value: magicUserData)
         event.flags = currentModifierFlags
-        GestureEventRecorder.shared.record("button.edge_posted", "type=\(event.type.rawValue) button=\(button.rawValue) flags=\(event.flags.rawValue)")
+        GestureEventRecorder.shared.record("button.edge_posted", "type=\(event.type.rawValue) button=\(button.rawValue) flags=\(event.flags.rawValue) click_count=\(clickCount)")
         event.post(tap: .cghidEventTap)
     }
     
@@ -742,6 +829,7 @@ final class MouseEventGenerator: @unchecked Sendable {
         // CGAssociateMouseAndMouseCursorPosition is a fast syscall (~microseconds),
         // safe to call under lock.
         let button = activeButton
+        let pressClickCount = activePressClickCount
         let releasedGeneration: UInt64? = stateLock.withLock {
             guard _dragGeneration == expectedGeneration else {
                 Log.info("forceReleaseDrag aborted - new drag session started (expected gen \(expectedGeneration), current \(_dragGeneration))", category: .gesture)
@@ -756,10 +844,11 @@ final class MouseEventGenerator: @unchecked Sendable {
         guard let releasedGeneration = releasedGeneration else {
             return
         }
+        resetTapClickSequence()
         
         // Send mouse up event synchronously to ensure it gets through
         let currentPos = currentMouseLocationQuartz
-        sendMouseUp(at: currentPos, button: button)
+        sendMouseUp(at: currentPos, button: button, clickCount: pressClickCount)
         
         // Also try sending via async queue in case the sync one gets swallowed
         // Only proceeds if no new drag has started (same generation)
@@ -777,7 +866,7 @@ final class MouseEventGenerator: @unchecked Sendable {
             self.previousDeltaY = 0
             
             let pos = self.currentMouseLocationQuartz
-            self.sendMouseUp(at: pos, button: button)
+            self.sendMouseUp(at: pos, button: button, clickCount: pressClickCount)
         }
     }
 }

@@ -24,7 +24,22 @@ class GestureRecognizer: @unchecked Sendable {
     private var lastCentroid: MTPoint?
     private var frameCount: Int = 0
     private(set) var traceContactID: UInt64 = 0
+    private(set) var gestureFingerCount = 3
+    var tapConfiguration: FingerTapConfiguration {
+        configuration.tapConfiguration(for: gestureFingerCount)
+    }
     private var pendingTapContactID: UInt64 = 0
+    private var pendingTapFingerCount = 3
+    private var pendingTapTimeout = 0.2
+    private var pendingTapDefersForSmartZoom = false
+    private var pendingSmartZoomWindow: Double = 0
+    private var contactSmartZoomEnabled = false
+    private var isSmartZoomSecondContact = false
+
+    /// Smart Zoom needs the first click withheld, even when early press is on.
+    var defersTapForSmartZoom: Bool {
+        gestureFingerCount == 2 && tapConfiguration.tapToClickEnabled && contactSmartZoomEnabled
+    }
     private var lastTraceFingerCount = -1
     private var traceMaximumMovement: Float = 0
 
@@ -49,6 +64,18 @@ class GestureRecognizer: @unchecked Sendable {
     private var holdMonitor: DispatchSourceTimer?
     private var deadlineGeneration: UInt64 = 0
 
+    // One contact session owns all progressive landing/lifting frames. Enabled
+    // low-finger modes use this arbiter; the default three-finger path is unchanged.
+    private var sessionOpen = false
+    private var waitForFullRelease = false
+    private var sessionLastCount = 0
+    private var sessionOnsetTime: Double = 0
+    private var contactDispatchTime: CFTimeInterval = 0
+    private var landingSettled = false
+    private var landingDeadline: DispatchWorkItem?
+    private var landingGeneration: UInt64 = 0
+    private let landingInterval = 0.03
+
     /// Drop sequence history when the coordinator rejects/passes through a gesture.
     func discardTapToDragSequence() {
         GestureEventRecorder.shared.record("sequence.discarded",
@@ -61,6 +88,7 @@ class GestureRecognizer: @unchecked Sendable {
         if pendingTap { delegate?.gestureRecognizerDidDiscardPendingTap(self) }
         pendingTap = false
         isTapToDragContact = false
+        isSmartZoomSecondContact = false
     }
 
     deinit {
@@ -68,6 +96,7 @@ class GestureRecognizer: @unchecked Sendable {
         holdDeadline?.cancel()
         releaseDeadline?.cancel()
         holdMonitor?.cancel()
+        landingDeadline?.cancel()
     }
 
     // MARK: - Public Interface
@@ -83,30 +112,6 @@ class GestureRecognizer: @unchecked Sendable {
         modifierFlags: CGEventFlags
     ) {
         let touchArray = unsafe touches.bindMemory(to: MTTouch.self, capacity: count)
-
-        // Check modifier key requirement first (if enabled)
-        if configuration.requireModifierKey {
-            let requiredFlagPresent: Bool
-            switch configuration.modifierKeyType {
-            case .shift:
-                requiredFlagPresent = modifierFlags.contains(.maskShift)
-            case .control:
-                requiredFlagPresent = modifierFlags.contains(.maskControl)
-            case .option:
-                requiredFlagPresent = modifierFlags.contains(.maskAlternate)
-            case .command:
-                requiredFlagPresent = modifierFlags.contains(.maskCommand)
-            }
-
-            if !requiredFlagPresent {
-                // Required modifier not held - cancel any active gesture and return
-                if state != .idle || pendingTap {
-                    GestureEventRecorder.shared.record("contact.modifier_missing", "contact=\(traceContactID) state=\(state)")
-                    handleGestureCancel()
-                }
-                return
-            }
-        }
 
         // Collect only valid touching fingers (state 3 = touching down, state 4 = active)
         // Skip state 5 (lifting), 6 (lingering), 7 (gone)
@@ -139,6 +144,31 @@ class GestureRecognizer: @unchecked Sendable {
         }
 
         let fingerCount = validFingers.count
+        // Check the modifier after filtering so cancellation can still observe full release.
+        if configuration.requireModifierKey {
+            let requiredFlagPresent: Bool
+            switch configuration.modifierKeyType {
+            case .shift:
+                requiredFlagPresent = modifierFlags.contains(.maskShift)
+            case .control:
+                requiredFlagPresent = modifierFlags.contains(.maskControl)
+            case .option:
+                requiredFlagPresent = modifierFlags.contains(.maskAlternate)
+            case .command:
+                requiredFlagPresent = modifierFlags.contains(.maskCommand)
+            }
+
+            if !requiredFlagPresent {
+                // Required modifier not held - cancel any active gesture and return
+                if state != .idle || pendingTap {
+                    GestureEventRecorder.shared.record("contact.modifier_missing", "contact=\(traceContactID) state=\(state)")
+                    handleGestureCancel()
+                }
+                if fingerCount == 0 { waitForFullRelease = false }
+                return
+            }
+        }
+
         // Keep every candidate-tap frame, but only finger-count changes during
         // established drags. This captures brief dropouts without logging motion forever.
         if state == .possibleTap || fingerCount != lastTraceFingerCount {
@@ -147,9 +177,14 @@ class GestureRecognizer: @unchecked Sendable {
                 + "touch_states=\((0..<count).map { unsafe touchArray[$0].state }) "
                 + "finger_ids=\((0..<count).map { unsafe touchArray[$0].fingerID }) "
                 + "state=\(state) release_frames=\(stableFrameCount) pending=\(pendingTap) "
-                + "pending_contact=\(pendingTapContactID) tap_to_drag_contact=\(isTapToDragContact)")
+                + "pending_contact=\(pendingTapContactID) tap_to_drag_contact=\(isTapToDragContact) owner_fingers=\(gestureFingerCount)")
         }
         lastTraceFingerCount = fingerCount
+
+        if configuration.hasLowFingerGestures {
+            processContactSession(fingers: validFingers, timestamp: timestamp)
+            return
+        }
 
         // ALWAYS cancel on 4+ fingers regardless of configuration
         // This ensures Mission Control and other system gestures always work
@@ -214,9 +249,17 @@ class GestureRecognizer: @unchecked Sendable {
         GestureEventRecorder.shared.record("recognizer.reset", "contact=\(traceContactID) state=\(state)")
         discardTapToDragSequence()
         resetContact()
+        sessionOpen = false
+        waitForFullRelease = false
+        sessionLastCount = 0
     }
 
     private func resetContact() {
+        landingGeneration &+= 1
+        landingDeadline?.cancel()
+        landingDeadline = nil
+        landingSettled = false
+        sessionOpen = false
         releaseGeneration &+= 1
         releaseDeadline?.cancel()
         releaseDeadline = nil
@@ -225,6 +268,7 @@ class GestureRecognizer: @unchecked Sendable {
         holdDeadline?.cancel()
         holdDeadline = nil
         isTapToDragContact = false
+        isSmartZoomSecondContact = false
         releaseTime = nil
         state = .idle
         lastFingerPositions = []
@@ -237,6 +281,198 @@ class GestureRecognizer: @unchecked Sendable {
     }
 
     // MARK: - Private Methods
+
+    private func processContactSession(fingers: [MTPoint], timestamp: Double) {
+        let count = fingers.count
+        if waitForFullRelease {
+            if count == 0 { waitForFullRelease = false }
+            return
+        }
+        if count >= 4 {
+            GestureEventRecorder.shared.record("contact.four_finger_cancel", "contact=\(traceContactID) valid=\(count)")
+            handleGestureCancel()
+            waitForFullRelease = true
+            return
+        }
+
+        if !sessionOpen {
+            guard count > 0 else { return }
+            // Read once per new session, including progressive 1 -> 2 landing.
+            // System settings can be changed while this experiment is running.
+            contactSmartZoomEnabled = configuration.twoFingerTaps.tapToClickEnabled
+                && SystemGestureHelper.isSmartZoomEnabled()
+            sessionOpen = true
+            gestureFingerCount = count
+            sessionLastCount = count
+            sessionOnsetTime = timestamp
+            // Reserve the deadline during landing without claiming a finger count.
+            // The sequence interval is measured at contact onset, not 30 ms later.
+            if pendingTap {
+                let gap = timestamp - pendingTapReleaseTime
+                if gap >= 0 && gap <= pendingTapTimeout {
+                    tapDeadline?.cancel()
+                    tapDeadline = nil
+                } else {
+                    commitPendingTap()
+                }
+            }
+            handleValidGesture(fingers: fingers, timestamp: timestamp)
+            scheduleLandingDeadline()
+            return
+        }
+
+        if count > gestureFingerCount {
+            GestureEventRecorder.shared.record("contact.fingers_added",
+                "contact=\(traceContactID) from=\(gestureFingerCount) to=\(count) state=\(state)")
+            if state == .dragging {
+                handleGestureCancel()
+                waitForFullRelease = true
+                return
+            }
+            // Escalation ends any provisional lower-count claim. Its first tap
+            // completes normally; the higher-count contact starts its own gesture.
+            if isTapToDragContact || isSmartZoomSecondContact {
+                delegate?.gestureRecognizerDidReleaseTapToDragCandidate(self)
+                isTapToDragContact = false
+                isSmartZoomSecondContact = false
+                commitPendingTap()
+            }
+            holdDeadline?.cancel()
+            holdDeadline = nil
+            gestureFingerCount = count
+            sessionLastCount = count
+            let centroid = calculateCentroid(fingers: fingers)
+            gestureStartPosition = centroid
+            lastCentroid = centroid
+            lastFingerPositions = fingers
+            traceMaximumMovement = 0
+            releaseTime = nil
+            stableFrameCount = 0
+            releaseGeneration &+= 1
+            releaseDeadline?.cancel()
+            releaseDeadline = nil
+            state = .possibleTap
+            delegate?.gestureRecognizerDidStart(self, at: centroid)
+            scheduleLandingDeadline()
+            return
+        }
+
+        let canRelift = state == .dragging && gestureFingerCount == 3
+            && configuration.allowReliftDuringDrag && count >= 2
+        if count == gestureFingerCount || canRelift {
+            if count != sessionLastCount {
+                // Adding/removing a finger shifts the centroid without motion.
+                lastCentroid = calculateCentroid(fingers: fingers)
+            }
+            sessionLastCount = count
+            handleValidGesture(fingers: fingers, timestamp: timestamp)
+            return
+        }
+
+        if releaseTime == nil { releaseTime = timestamp }
+        holdDeadline?.cancel()
+        holdDeadline = nil
+        stableFrameCount += 1
+        sessionLastCount = count
+        if stableFrameCount == 1 {
+            GestureEventRecorder.shared.record("contact.release_candidate",
+                "contact=\(traceContactID) frame_time=\(timestamp) valid=\(count) owner_fingers=\(gestureFingerCount) state=\(state)")
+        }
+        // End a drag when a required finger lifts. First-contact taps wait until
+        // all fingers lift so 3 -> 2 -> 1 cannot arm lower-count sequences.
+        if state == .dragging || count == 0 {
+            if stableFrameCount == 1 || releaseDeadline == nil {
+                scheduleReleaseConfirmation(at: timestamp)
+            }
+            if stableFrameCount >= 2 {
+                finishContactSession(timestamp: timestamp)
+            }
+        }
+    }
+
+    private func finishContactSession(timestamp: Double) {
+        // A very short contact may lift before the landing timer is serviced.
+        if !landingSettled { settleLanding(contactIsDown: false) }
+        // Movement before the landing deadline still disqualifies a tap even
+        // when the contact lifts before the timer gets a chance to classify it.
+        if state == .possibleTap && traceMaximumMovement > configuration.moveThreshold {
+            if isTapToDragContact || gestureFingerCount == 3 { beginDragging() }
+            else { rejectOrdinaryMovement() }
+        }
+        let stillTouching = sessionLastCount > 0
+        handleGestureEnd(timestamp: timestamp)
+        waitForFullRelease = stillTouching
+    }
+
+    private func scheduleLandingDeadline() {
+        landingGeneration &+= 1
+        landingDeadline?.cancel()
+        landingSettled = false
+        let generation = landingGeneration
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.landingGeneration == generation, self.sessionOpen,
+                  self.sessionLastCount == self.gestureFingerCount else { return }
+            self.settleLanding(contactIsDown: true)
+        }
+        landingDeadline = work
+        timerQueue.asyncAfter(deadline: .now() + landingInterval, execute: work)
+    }
+
+    private func settleLanding(contactIsDown: Bool) {
+        landingSettled = true
+        landingDeadline?.cancel()
+        landingDeadline = nil
+        GestureEventRecorder.shared.record("contact.landing_settled",
+            "contact=\(traceContactID) fingers=\(gestureFingerCount) down=\(contactIsDown) smart_zoom=\(defersTapForSmartZoom)")
+        if pendingTap {
+            let gap = sessionOnsetTime - pendingTapReleaseTime
+            isSmartZoomSecondContact = pendingTapDefersForSmartZoom && defersTapForSmartZoom
+                && pendingTapFingerCount == 2 && gap >= 0 && gap <= pendingSmartZoomWindow
+            if pendingTapFingerCount == gestureFingerCount && tapConfiguration.tapToDragEnabled
+                && gap >= 0 && gap <= tapConfiguration.tapToDragTimeout {
+                claimPendingTap(at: sessionOnsetTime)
+            } else if !isSmartZoomSecondContact {
+                commitPendingTap()
+            }
+        }
+        if isTapToDragContact && contactIsDown {
+            delegate?.gestureRecognizerDidClaimTapToDrag(self)
+            if isTapToDragContact { scheduleHoldDeadline(elapsed: max(0, CACurrentMediaTime() - contactDispatchTime)) }
+        }
+        if contactIsDown, state == .possibleTap,
+           traceMaximumMovement > configuration.moveThreshold {
+            if isTapToDragContact || gestureFingerCount == 3 { beginDragging() }
+            else { rejectOrdinaryMovement() }
+        }
+    }
+
+    private func claimPendingTap(at timestamp: Double) {
+        guard pendingTap else { return }
+        let interval = timestamp - pendingTapReleaseTime
+        GestureEventRecorder.shared.record("sequence.next_contact",
+            "contact=\(traceContactID) pending_contact=\(pendingTapContactID) fingers=\(gestureFingerCount) gap=\(interval) timeout=\(pendingTapTimeout)")
+        let dragTimeout = pendingTapDefersForSmartZoom ? tapConfiguration.tapToDragTimeout : pendingTapTimeout
+        if pendingTapFingerCount == gestureFingerCount && interval >= 0 && interval <= dragTimeout {
+            isTapToDragContact = true
+            tapDeadline?.cancel()
+            tapDeadline = nil
+        } else {
+            commitPendingTap()
+        }
+    }
+
+    private func rejectOrdinaryMovement() {
+        GestureEventRecorder.shared.record("contact.native_movement",
+            "contact=\(traceContactID) fingers=\(gestureFingerCount) max_displacement=\(traceMaximumMovement)")
+        state = .waitingForRelease
+        // Outside the drag timeout, movement is ordinary scrolling. The first
+        // tap is no longer part of a Smart Zoom double tap and must still click.
+        if isSmartZoomSecondContact {
+            isSmartZoomSecondContact = false
+            commitPendingTap()
+        }
+        delegate?.gestureRecognizerDidCancel(self)
+    }
 
     private func handleValidGesture(fingers: [MTPoint], timestamp: Double) {
         if stableFrameCount > 0 {
@@ -265,26 +501,18 @@ class GestureRecognizer: @unchecked Sendable {
         case .idle:
             traceContactID &+= 1
             traceMaximumMovement = 0
-            // Claim the preceding tap before its delayed click can be emitted.
-            if pendingTap {
-                let interval = timestamp - pendingTapReleaseTime
-                GestureEventRecorder.shared.record("sequence.next_contact",
-                    "contact=\(traceContactID) pending_contact=\(pendingTapContactID) gap=\(interval) timeout=\(configuration.tapToDragTimeout)")
-                if interval >= 0 && interval <= configuration.tapToDragTimeout {
-                    isTapToDragContact = true
-                    tapDeadline?.cancel()
-                    tapDeadline = nil
-                } else {
-                    commitPendingTap()
-                }
+            if !configuration.hasLowFingerGestures {
+                gestureFingerCount = 3
+                claimPendingTap(at: timestamp)
             }
+            contactDispatchTime = CACurrentMediaTime()
             state = .possibleTap
             gestureStartTime = timestamp
             gestureStartPosition = centroid
             lastCentroid = centroid
             lastFingerPositions = fingers
             GestureEventRecorder.shared.record("contact.started",
-                "contact=\(traceContactID) frame_time=\(timestamp) tap_to_drag_contact=\(isTapToDragContact)")
+                "contact=\(traceContactID) frame_time=\(timestamp) tap_to_drag_contact=\(isTapToDragContact) fingers=\(gestureFingerCount)")
             delegate?.gestureRecognizerDidStart(self, at: centroid)
             if isTapToDragContact { scheduleHoldDeadline() }
 
@@ -297,11 +525,16 @@ class GestureRecognizer: @unchecked Sendable {
                 "contact=\(traceContactID) elapsed=\(timestamp - gestureStartTime) displacement=\(movement) "
                 + "max_displacement=\(traceMaximumMovement) threshold=\(configuration.moveThreshold)")
             let holdLimit = min(configuration.tapThreshold, configuration.maxTapHoldDuration)
-            if movement > configuration.moveThreshold
-                || (isTapToDragContact && timestamp - gestureStartTime >= holdLimit) {
+            let canCommit = !configuration.hasLowFingerGestures || landingSettled
+            if canCommit && (movement > configuration.moveThreshold
+                || (isTapToDragContact && timestamp - gestureStartTime >= holdLimit)) {
                 GestureEventRecorder.shared.record("drag.threshold_reached",
                     "contact=\(traceContactID) movement=\(movement > configuration.moveThreshold) elapsed=\(timestamp - gestureStartTime)")
-                beginDragging()
+                if gestureFingerCount == 3 || isTapToDragContact {
+                    beginDragging()
+                } else {
+                    rejectOrdinaryMovement()
+                }
                 lastCentroid = centroid
             } else {
                 lastCentroid = centroid
@@ -342,7 +575,7 @@ class GestureRecognizer: @unchecked Sendable {
 
     private func beginDragging() {
         GestureEventRecorder.shared.record("drag.recognized",
-            "contact=\(traceContactID) mode=\(isTapToDragContact ? "tap_to_drag" : "direct") consumes_pending=\(pendingTap)")
+            "contact=\(traceContactID) mode=\(isTapToDragContact ? "tap_to_drag" : "direct") consumes_pending=\(pendingTap) fingers=\(gestureFingerCount)")
         holdDeadline?.cancel()
         holdDeadline = nil
         if isTapToDragContact {
@@ -383,7 +616,11 @@ class GestureRecognizer: @unchecked Sendable {
             // Hardware need not send a second empty frame. Retain the release
             // debounce, but guarantee taps/holds finish when callbacks go quiet.
             GestureEventRecorder.shared.record("contact.release_confirmed", "contact=\(self.traceContactID) via=timer")
-            self.handleGestureEnd(timestamp: timestamp + 0.02)
+            if self.configuration.hasLowFingerGestures {
+                self.finishContactSession(timestamp: timestamp + 0.02)
+            } else {
+                self.handleGestureEnd(timestamp: timestamp + 0.02)
+            }
         }
         releaseDeadline = work
         timerQueue.asyncAfter(deadline: .now() + 0.02, execute: work)
@@ -420,6 +657,12 @@ class GestureRecognizer: @unchecked Sendable {
     private func deferTap(releasedAt timestamp: Double, processedAt frameTime: Double) {
         pendingTap = true
         pendingTapContactID = traceContactID
+        pendingTapFingerCount = gestureFingerCount
+        pendingTapDefersForSmartZoom = defersTapForSmartZoom
+        pendingSmartZoomWindow = pendingTapDefersForSmartZoom ? NSEvent.doubleClickInterval : 0
+        let dragWindow = tapConfiguration.tapToDragEnabled ? tapConfiguration.tapToDragTimeout : 0
+        pendingTapTimeout = pendingTapDefersForSmartZoom
+            ? max(dragWindow, pendingSmartZoomWindow) : tapConfiguration.tapToDragTimeout
         pendingTapReleaseTime = timestamp
         deadlineGeneration &+= 1
         let generation = deadlineGeneration
@@ -432,16 +675,16 @@ class GestureRecognizer: @unchecked Sendable {
         tapDeadline = work
         // Frame timestamps need not share Dispatch's epoch. Only subtract frame
         // timestamps from each other, then schedule the remaining duration.
-        let remaining = max(0, configuration.tapToDragTimeout - (frameTime - timestamp))
+        let remaining = max(0, pendingTapTimeout - (frameTime - timestamp))
         GestureEventRecorder.shared.record("tap.deferred",
-            "contact=\(traceContactID) released_at=\(timestamp) remaining=\(remaining) timeout=\(configuration.tapToDragTimeout)")
+            "contact=\(traceContactID) released_at=\(timestamp) remaining=\(remaining) timeout=\(pendingTapTimeout) fingers=\(pendingTapFingerCount) smart_zoom=\(pendingTapDefersForSmartZoom) smart_zoom_window=\(pendingSmartZoomWindow)")
         delegate?.gestureRecognizerDidDeferTap(self)
         timerQueue.asyncAfter(deadline: .now() + remaining, execute: work)
     }
 
     private func handleGestureEnd(timestamp: Double) {
         // Preserve legacy release-debounce timing when the new feature is off.
-        let endedAt = configuration.tapToDragEnabled ? (releaseTime ?? timestamp) : timestamp
+        let endedAt = (tapConfiguration.tapToDragEnabled || configuration.hasLowFingerGestures) ? (releaseTime ?? timestamp) : timestamp
         let elapsed = endedAt - gestureStartTime
         GestureEventRecorder.shared.record("contact.ended",
             "contact=\(traceContactID) state=\(state) elapsed=\(elapsed) max_displacement=\(traceMaximumMovement) "
@@ -456,6 +699,21 @@ class GestureRecognizer: @unchecked Sendable {
 
         switch state {
         case .possibleTap:
+            if isSmartZoomSecondContact && elapsed < configuration.tapThreshold
+                && elapsed <= configuration.maxTapHoldDuration
+                && traceMaximumMovement <= configuration.moveThreshold {
+                GestureEventRecorder.shared.record("tap.smart_zoom_double_tap",
+                    "contact=\(traceContactID) first_contact=\(pendingTapContactID) action=discard_both_clicks")
+                discardTapToDragSequence()
+                resetContact()
+                return
+            }
+            if isSmartZoomSecondContact && !isTapToDragContact {
+                // A long second contact outside the drag window is not a double
+                // tap. Commit only the preceding short tap.
+                isSmartZoomSecondContact = false
+                commitPendingTap()
+            }
             if isTapToDragContact { commitPendingTap() }
             if elapsed < configuration.tapThreshold && elapsed <= configuration.maxTapHoldDuration {
                 // Eligibility is checked at recognition, before storing a delayed click.
@@ -463,7 +721,7 @@ class GestureRecognizer: @unchecked Sendable {
                 GestureEventRecorder.shared.record("tap.recognized", "contact=\(traceContactID) accepted=\(accepted)")
                 resetContact()
                 if accepted {
-                    if configuration.tapToDragEnabled {
+                    if tapConfiguration.tapToDragEnabled || defersTapForSmartZoom {
                         deferTap(releasedAt: endedAt, processedAt: timestamp)
                     } else {
                         GestureEventRecorder.shared.record("tap.immediate", "contact=\(traceContactID)")
@@ -485,6 +743,7 @@ class GestureRecognizer: @unchecked Sendable {
 
     /// Cancel gesture without completing it (e.g., when 4th finger detected)
     private func handleGestureCancel() {
+        let waitForRelease = configuration.hasLowFingerGestures && sessionLastCount > 0
         GestureEventRecorder.shared.record("contact.cancelled", "contact=\(traceContactID) state=\(state) pending=\(pendingTap)")
         switch state {
         case .possibleTap:
@@ -498,6 +757,7 @@ class GestureRecognizer: @unchecked Sendable {
         }
 
         reset()
+        waitForFullRelease = waitForRelease
     }
 
     private func calculateCentroid(fingers: [MTPoint]) -> MTPoint {
@@ -546,6 +806,12 @@ protocol GestureRecognizerDelegate: AnyObject {
     /// Called when a tap click is committed (possibly after the sequence timeout)
     func gestureRecognizerDidTap(_ recognizer: GestureRecognizer)
 
+    /// A matching second contact has claimed the sequence after landing settles.
+    func gestureRecognizerDidClaimTapToDrag(_ recognizer: GestureRecognizer)
+
+    /// Release provisional cursor ownership when a contact escalates finger count.
+    func gestureRecognizerDidReleaseTapToDragCandidate(_ recognizer: GestureRecognizer)
+
     /// Called on first-tap release when the sequence timeout is armed.
     func gestureRecognizerDidDeferTap(_ recognizer: GestureRecognizer)
 
@@ -571,6 +837,8 @@ protocol GestureRecognizerDelegate: AnyObject {
 // Existing delegates can accept taps without handling the delayed-click policy.
 extension GestureRecognizerDelegate {
     func gestureRecognizerShouldAcceptTap(_ recognizer: GestureRecognizer) -> Bool { true }
+    func gestureRecognizerDidClaimTapToDrag(_ recognizer: GestureRecognizer) {}
+    func gestureRecognizerDidReleaseTapToDragCandidate(_ recognizer: GestureRecognizer) {}
     func gestureRecognizerDidDeferTap(_ recognizer: GestureRecognizer) {}
     func gestureRecognizerDidDiscardPendingTap(_ recognizer: GestureRecognizer) {}
 }

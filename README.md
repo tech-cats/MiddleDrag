@@ -63,7 +63,7 @@ Mac trackpads don't have a middle mouse button. Many apps expect one.
 
 - **Three-finger tap** → Middle mouse click by default; configurable left/middle/right button
 - **Three-finger drag** → Middle mouse drag by default; configurable left/middle/right button
-- **Tap to Drag** → Optional three-finger tap followed by a three-finger hold/drag, with an independent button and configurable timeout
+- **3-finger Tap to Drag** → Optional three-finger tap followed by a three-finger hold/drag, with an independent button and configurable timeout
 - **Works with system gestures** — Mission Control, Exposé, and other macOS gestures remain functional
 - **Native macOS app** — Menu bar interface, no terminal configuration required
 - **Configurable** — Adjust sensitivity and smoothing to your preference
@@ -110,17 +110,29 @@ MiddleDrag runs in your menu bar as a hand icon.
 
 To combine middle clicks with left dragging in user space, configure the menu:
 
-1. **Tap to Click** → Enabled, Middle Button.
-2. **Direct Drag** → Enabled, Left Button.
-3. **Tap to Drag** → Enabled, Middle Button. Its timeout defaults to **200 ms**; choose a preset or **Custom…** to change it.
+1. **3-finger Tap to Click** → Enabled, Middle Button.
+2. **3-finger Direct Drag** → Enabled, Left Button.
+3. **3-finger Tap to Drag** → Enabled, Middle Button. Its timeout defaults to **200 ms**; choose a preset or **Custom…** to change it.
 
 Tap to Drag requires lifting after the first tap, then putting three fingers down again within the timeout. On the second contact, significant movement starts dragging immediately. A stationary contact becomes a hold at the existing tap-duration limit (150 ms by default), allowing a long press without moving. The button is pressed at that point if it was not pressed early as described below. Lifting ends the hold or drag; existing cancellation and relift settings still apply.
 
-**Tap to Drag → Press Button on First Tap Release** is on by default. When Tap to Click and Tap to Drag are both enabled and use the same button, lifting the first tap presses that button immediately. If no second contact arrives within the timeout, the button is released to complete the click. A following hold/drag keeps the button pressed until release. The cursor remains free between contacts.
+**3-finger Tap to Drag → Press Button on First Tap Release** is on by default. When Tap to Click and Tap to Drag are both enabled and use the same button, lifting the first tap presses that button immediately. If no second contact arrives within the timeout, the button is released to complete the click. A following hold/drag keeps the button pressed until release. The cursor remains free between contacts.
 
 When this option is off, or the two gestures use different buttons, ordinary tap clicks wait for the timeout and a following hold/drag consumes the first click. With either behavior, two short taps still produce two clicks, and the latest tap can arm the next hold/drag. Small accidental movements remain taps under the existing movement threshold. Tap to Click must be enabled for an early press; otherwise the first tap silently arms Tap to Drag as before.
 
 All three gestures have independent enable switches and button choices. Tap to Drag also works with Tap to Click or Direct Drag disabled. Existing installations retain middle tapping and middle dragging with Tap to Drag off.
+
+This experiment also adds **1-finger Tap to Click**, **1-finger Tap to Drag**, **2-finger Tap to Click**, and **2-finger Tap to Drag**. All four are initially disabled. The one-finger options default to the left button and the two-finger options to the right button. Each tap-click and tap-drag option has its own button choice and enable switch; each tap-drag menu has an independent 200 ms timeout and default-on early-press option. Early press requires the corresponding tap-click option to be enabled with the same button. Tap-to-drag with tap-click disabled uses a silent first tap.
+
+Both contacts must have the same finger count and all fingers must lift between contacts. The recognizer allows 30 ms after landing or adding fingers for the count to settle. A different-count second contact completes the preceding tap normally, then becomes its own gesture. Ordinary one-finger pointer movement and two-finger scrolling remain native. Once a matching second contact claims tap-to-drag, native cursor movement, scrolling, and competing mouse clicks are suppressed while the contact is classified as a second tap or hold/drag. Lifting a required finger ends a one-/two-finger drag; adding fingers after a drag commits cancels it. The existing three-finger relift option still allows 3 → 2 → 3 continuation. Finger-count changes reset the centroid baseline to avoid cursor jumps, and lifting cannot arm a new lower-count tap.
+
+Generated tap clicks carry consecutive click counts using the macOS double-click interval, matching button/modifiers, and a four-point cursor tolerance. Counts use the original tap recognition times even when clicks are deferred. Early presses preserve the count on release; actual dragging or cancellation resets the sequence. This lets two short taps register as a double-click rather than two single clicks.
+
+When macOS **Smart zoom** is enabled, it takes priority over MiddleDrag's two-finger double tap. MiddleDrag reads the setting at each new contact session and withholds the first two-finger tap-click, overriding **Press Button on First Tap Release**. Two short, nearly stationary two-finger taps within the macOS double-click interval discard both MiddleDrag clicks, leaving the native Smart Zoom gesture available. A single tap clicks after that interval, or the configured tap-to-drag timeout if it is longer. The delayed click retains the first tap's cursor position.
+
+Two-finger tap-to-drag still uses its configured timeout and existing movement/hold thresholds: a second contact within that timeout starts dragging on significant movement or becomes a hold at the tap-duration limit. The Smart Zoom interval does not extend the drag timeout. With Smart Zoom off, the usual double-click and early-press behavior applies. Detection checks both built-in and Bluetooth trackpad preference domains; if either enables Smart Zoom, this experiment gives it priority on all trackpads. The double-click interval is an experimental approximation of the native Smart Zoom timing.
+
+Native ordinary mouse clicks are passed through during first one-/two-finger contacts. You can toggle macOS Tap to click and secondary-click settings independently for experimentation; MiddleDrag does not change them. Native and MiddleDrag tap-click can both emit clicks when enabled together, and a native first-tap click cannot be consumed retroactively by tap-to-drag or Smart Zoom priority. Native secondary clicks may therefore still flash a context menu during Smart Zoom. When MiddleDrag Tap to Click is disabled, native button edges suppressed during a claimed second contact are buffered: a short second tap replays them with their native click counts and lets late edges through, while a hold/drag discards them. Native events can also arrive during the 30 ms landing window before a second contact claims the sequence. For an initial comparison, try the new tap-click and tap-drag options with native tapping off, then toggle them separately to compare behavior. Use Gesture Diagnostics to record the resulting sequences.
 
 When enabled Direct Drag and Tap to Click use different buttons, physical three-finger left-button events are suppressed instead of immediately converted to the tap button. The recognizer then selects a tap or drag from the contact's movement and release. This prevents an incidental press from emitting a middle click just before a left drag. Physical-click conversion retains its legacy behavior when direct dragging is disabled or both buttons match.
 
@@ -137,11 +149,12 @@ Events arriving before gesture recognition are not buffered, and momentum is not
 ### Settings
 
 - **Enabled** — Toggle gesture recognition
-- **Tap to Click / Direct Drag / Tap to Drag** — Independent enable switches and left/middle/right button choices
-- **Tap to Drag → Timeout** — Release-to-next-contact interval, with presets and custom milliseconds
-- **Tap to Drag → Press Button on First Tap Release** — Default-on early press when tap-click and tap-to-drag buttons match
+- **3-finger Tap to Click / Direct Drag / Tap to Drag** — Existing independent enable switches and left/middle/right button choices
+- **1-finger and 2-finger Tap to Click / Tap to Drag** — Experimental independent controls, initially disabled
+- **Each Tap to Drag → Timeout** — Release-to-next-contact interval, with presets and custom milliseconds
+- **Each Tap to Drag → Press Button on First Tap Release** — Default-on early press when tap-click and tap-to-drag buttons match
 - **Drag Sensitivity** — Cursor speed during drag (0.5x – 2x)
-- **Require Exactly 3 Fingers** — Ignore 4+ finger touches
+- **Four or more fingers** — Cancel MiddleDrag gestures so system gestures remain available
 - **Launch at Login** — Auto-start with macOS
 
 ### Diagnosing unexpected clicks
@@ -151,6 +164,10 @@ Use **Advanced → Gesture Diagnostics → Start New Recording**, then use your 
 The local log records contact IDs, finger counts and touch states, normalized movement distances, tap/hold/release timer decisions, configured buttons, and requested/posted mouse-button edges. It also records external mouse-button events observed by MiddleDrag's event tap. It does not collect text, application/window names, or screen coordinates, and it is not uploaded through telemetry.
 
 For a middle click before a direct drag, find `user.unexpected_click` and look backwards for `click.down_posted`. Its `source` identifies `force_click` (an external left click converted by the event tap) or `recognized_tap` (a recognizer tap). Match `request` to `click.requested`, then follow `contact` through `touch.frame`, `contact.release_candidate`, `tap.recognized`, `tap.deferred`, and `drag.recognized`. If the middle-button edge is `button.edge_posted` instead, look for `button.pending_press` and `tap.early_press` to identify a press on the first tap's release, or follow the preceding `drag.recognized` mode for a drag/hold press. A `request` without `click.down_posted` may have been skipped; `event_tap.received` with `own=false` identifies an event not tagged by MiddleDrag, but does not by itself identify which device or utility generated it.
+
+For the low-finger experiment, follow `configuration.low_finger`, `contact.landing_settled`, `sequence.next_contact`, `sequence.claimed`, and `drag.recognized`. These include the finger count. `contact.fingers_added` records escalation or cancellation; `contact.native_movement` identifies ordinary pointer/scroll motion that did not become a MiddleDrag gesture. `scroll.event` records low-finger ownership and its release cooldown. `click_count` on posted edges identifies single/double/triple clicks; `event_tap.native_click_buffered` and `click.native_replayed` track native second-tap clicks. The recorder remains opt-in and local.
+
+For Smart Zoom priority, `contact.landing_settled` and `tap.deferred` record `smart_zoom` and the deferred interval. `tap.early_press_overridden` identifies a withheld first press; `tap.smart_zoom_double_tap` records both generated clicks being discarded. A single tap follows `tap.deadline_fired` → `tap.pending_committed` → `tap.click_committed` instead.
 
 Existing operational logs are also available in macOS Console (filter for the MiddleDrag process), or with:
 

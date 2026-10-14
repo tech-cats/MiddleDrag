@@ -59,6 +59,22 @@ enum GestureMouseButton: String, Codable, CaseIterable, Sendable {
 
 // MARK: - Configuration
 
+/// Independent tap-click and tap-drag choices for one finger count.
+struct FingerTapConfiguration: Codable, Sendable {
+    var tapToClickEnabled = false
+    var tapButton: GestureMouseButton = .left
+    var tapToDragEnabled = false
+    var tapToDragButton: GestureMouseButton = .left
+    var tapToDragTimeout = 0.2
+    var tapToDragImmediatePress = true
+
+    var isEnabled: Bool { tapToClickEnabled || tapToDragEnabled }
+    var usesImmediatePress: Bool {
+        tapToDragImmediatePress && tapToClickEnabled && tapToDragEnabled
+            && tapButton == tapToDragButton
+    }
+}
+
 /// Configuration for gesture detection and mouse behavior
 public struct GestureConfiguration: Sendable {
     // Sensitivity and smoothing
@@ -86,6 +102,22 @@ public struct GestureConfiguration: Sendable {
     var tapToDragButton: GestureMouseButton = .middle
     var tapToDragTimeout: Double = 0.2  // Release to next three-finger contact
     var tapToDragImmediatePress: Bool = true
+    var oneFingerTaps = FingerTapConfiguration()
+    var twoFingerTaps = FingerTapConfiguration(tapButton: .right, tapToDragButton: .right)
+
+    var hasLowFingerGestures: Bool { oneFingerTaps.isEnabled || twoFingerTaps.isEnabled }
+
+    func tapConfiguration(for fingerCount: Int) -> FingerTapConfiguration {
+        switch fingerCount {
+        case 1: return oneFingerTaps
+        case 2: return twoFingerTaps
+        default:
+            return FingerTapConfiguration(
+                tapToClickEnabled: tapToClickEnabled, tapButton: tapButton,
+                tapToDragEnabled: tapToDragEnabled, tapToDragButton: tapToDragButton,
+                tapToDragTimeout: tapToDragTimeout, tapToDragImmediatePress: tapToDragImmediatePress)
+        }
+    }
 
     /// Press on the first tap's release only when either outcome uses this button.
     var usesImmediateTapToDragPress: Bool {
@@ -260,6 +292,8 @@ public struct HotKeyBinding: Codable, Equatable, Sendable {
 
 /// User preferences that persist across app launches
 public struct UserPreferences: Codable, Sendable {
+    var oneFingerTaps = FingerTapConfiguration()
+    var twoFingerTaps = FingerTapConfiguration(tapButton: .right, tapToDragButton: .right)
     public var launchAtLogin: Bool = false
     var dragSensitivity: Double = 1.0
     var tapThreshold: Double = 0.15
@@ -333,6 +367,8 @@ public struct UserPreferences: Codable, Sendable {
             tapToDragButton: tapToDragButton,
             tapToDragTimeout: tapToDragTimeout,
             tapToDragImmediatePress: tapToDragImmediatePress,
+            oneFingerTaps: oneFingerTaps,
+            twoFingerTaps: twoFingerTaps,
             exclusionZoneEnabled: exclusionZoneEnabled,
             exclusionZoneSize: Float(exclusionZoneSize),
             requireModifierKey: requireModifierKey,

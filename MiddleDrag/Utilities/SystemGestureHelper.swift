@@ -57,6 +57,7 @@ public class SystemGestureHelper {
 
     /// Trackpad settings domain
     static let trackpadDomain = "com.apple.AppleMultitouchTrackpad"
+    static let bluetoothTrackpadDomain = "com.apple.driver.AppleBluetoothMultitouch.trackpad"
 
     /// Trackpad gesture setting keys
     enum TrackpadKey: String, CaseIterable {
@@ -73,6 +74,16 @@ public class SystemGestureHelper {
     }
 
     // MARK: - Detection
+
+    /// Read only: Smart Zoom uses 0 for off and a nonzero value for on. Touch
+    /// frames do not identify which preference domain owns the device, so give
+    /// Smart Zoom priority conservatively if either trackpad domain enables it.
+    static func isSmartZoomEnabled() -> Bool {
+        let key = "TrackpadTwoFingerDoubleTapGesture"
+        return [trackpadDomain, bluetoothTrackpadDomain].contains { domain in
+            (unsafe settingsProvider.getSetting(forKey: key, domain: domain) ?? 0) != 0
+        }
+    }
 
     /// Returns true if 3-finger gestures are enabled that could conflict with MiddleDrag
     public static func hasConflictingSettings() -> Bool {

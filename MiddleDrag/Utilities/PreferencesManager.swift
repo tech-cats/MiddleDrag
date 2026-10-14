@@ -24,6 +24,8 @@ public final class PreferencesManager: @unchecked Sendable {
         static let tapToDragButton = "tapToDragButton"
         static let tapToDragTimeout = "tapToDragTimeout"
         static let tapToDragImmediatePress = "tapToDragImmediatePress"
+        static let oneFingerTaps = "oneFingerTaps"
+        static let twoFingerTaps = "twoFingerTaps"
         // Palm rejection keys
         static let exclusionZoneEnabled = "exclusionZoneEnabled"
         static let exclusionZoneSize = "exclusionZoneSize"
@@ -108,6 +110,17 @@ public final class PreferencesManager: @unchecked Sendable {
         ])
     }
 
+    private func loadFingerTaps(key: String, defaultButton: GestureMouseButton) -> FingerTapConfiguration {
+        guard let data = userDefaults.data(forKey: key),
+              var settings = try? JSONDecoder().decode(FingerTapConfiguration.self, from: data) else {
+            return FingerTapConfiguration(tapButton: defaultButton, tapToDragButton: defaultButton)
+        }
+        if !settings.tapToDragTimeout.isFinite || !(0.001...60).contains(settings.tapToDragTimeout) {
+            settings.tapToDragTimeout = 0.2
+        }
+        return settings
+    }
+
     /// Load preferences from UserDefaults
     public func loadPreferences() -> UserPreferences {
         let modifierKeyRaw =
@@ -117,6 +130,8 @@ public final class PreferencesManager: @unchecked Sendable {
         // Create with defaults, then override with saved values
         // This handles new keys that don't exist in older UserDefaults
         var prefs = UserPreferences()
+        prefs.oneFingerTaps = loadFingerTaps(key: Keys.oneFingerTaps, defaultButton: .left)
+        prefs.twoFingerTaps = loadFingerTaps(key: Keys.twoFingerTaps, defaultButton: .right)
 
         prefs.launchAtLogin = userDefaults.bool(forKey: Keys.launchAtLogin)
         prefs.dragSensitivity = userDefaults.double(forKey: Keys.dragSensitivity)
@@ -160,6 +175,12 @@ public final class PreferencesManager: @unchecked Sendable {
 
     /// Save preferences to UserDefaults
     public func savePreferences(_ preferences: UserPreferences) {
+        if let data = try? JSONEncoder().encode(preferences.oneFingerTaps) {
+            userDefaults.set(data, forKey: Keys.oneFingerTaps)
+        }
+        if let data = try? JSONEncoder().encode(preferences.twoFingerTaps) {
+            userDefaults.set(data, forKey: Keys.twoFingerTaps)
+        }
         userDefaults.set(preferences.launchAtLogin, forKey: Keys.launchAtLogin)
         userDefaults.set(preferences.dragSensitivity, forKey: Keys.dragSensitivity)
         userDefaults.set(preferences.tapThreshold, forKey: Keys.tapThreshold)

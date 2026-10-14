@@ -119,6 +119,11 @@ public class MenuBarController: NSObject {
         menu.addItem(createMiddleDragItem())
         menu.addItem(createTapToDragItem())
         menu.addItem(NSMenuItem.separator())
+        for fingerCount in [1, 2] {
+            menu.addItem(createLowFingerTapToClickItem(fingerCount: fingerCount))
+            menu.addItem(createTapToDragItem(fingerCount: fingerCount))
+        }
+        menu.addItem(NSMenuItem.separator())
 
         // Settings
         menu.addItem(createSensitivityMenu())
@@ -165,7 +170,21 @@ public class MenuBarController: NSObject {
         return item
     }
 
-    private enum GestureChoice: Int { case tap, directDrag, tapToDrag }
+    private enum GestureChoice: Int {
+        case tap, directDrag, tapToDrag, oneFingerTap, oneFingerDrag, twoFingerTap, twoFingerDrag
+        var fingerCount: Int {
+            switch self {
+            case .oneFingerTap, .oneFingerDrag: return 1
+            case .twoFingerTap, .twoFingerDrag: return 2
+            default: return 3
+            }
+        }
+        var isTap: Bool { self == .oneFingerTap || self == .twoFingerTap }
+    }
+    private struct TimeoutSelection {
+        let fingerCount: Int
+        let seconds: Double
+    }
     private struct ButtonSelection {
         let gesture: GestureChoice
         let button: GestureMouseButton
@@ -173,9 +192,9 @@ public class MenuBarController: NSObject {
 
     private func createGestureMenu(title: String, gesture: GestureChoice,
                                    enabled: Bool, button: GestureMouseButton,
-                                   action: Selector, tag: MenuItemTag) -> NSMenuItem {
+                                   action: Selector, tag: MenuItemTag? = nil) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-        item.tag = tag.rawValue
+        item.tag = tag?.rawValue ?? -1
         item.state = enabled ? .on : .off
         let submenu = NSMenu()
         let toggle = createMenuItem(title: "Enabled", action: action)
@@ -194,43 +213,61 @@ public class MenuBarController: NSObject {
     }
 
     private func createMiddleDragItem() -> NSMenuItem {
-        createGestureMenu(title: "Direct Drag", gesture: .directDrag,
+        createGestureMenu(title: "3-finger Direct Drag", gesture: .directDrag,
                           enabled: preferences.middleDragEnabled,
                           button: preferences.directDragButton,
                           action: #selector(toggleMiddleDrag), tag: .middleDrag)
     }
 
     private func createTapToClickItem() -> NSMenuItem {
-        createGestureMenu(title: "Tap to Click", gesture: .tap,
+        createGestureMenu(title: "3-finger Tap to Click", gesture: .tap,
                           enabled: preferences.tapToClickEnabled,
                           button: preferences.tapButton,
                           action: #selector(toggleTapToClick), tag: .tapToClick)
     }
 
-    private func createTapToDragItem() -> NSMenuItem {
-        let item = createGestureMenu(title: "Tap to Drag", gesture: .tapToDrag,
-                                     enabled: preferences.tapToDragEnabled,
-                                     button: preferences.tapToDragButton,
-                                     action: #selector(toggleTapToDrag), tag: .tapToDrag)
+    private func createLowFingerTapToClickItem(fingerCount: Int) -> NSMenuItem {
+        let settings = preferences.gestureConfig.tapConfiguration(for: fingerCount)
+        let gesture: GestureChoice = fingerCount == 1 ? .oneFingerTap : .twoFingerTap
+        let item = createGestureMenu(title: "\(fingerCount)-finger Tap to Click", gesture: gesture,
+                                     enabled: settings.tapToClickEnabled, button: settings.tapButton,
+                                     action: #selector(toggleLowFingerGesture(_:)))
+        item.submenu?.items.first?.representedObject = gesture
+        return item
+    }
+
+    private func createTapToDragItem(fingerCount: Int = 3) -> NSMenuItem {
+        let settings = preferences.gestureConfig.tapConfiguration(for: fingerCount)
+        let gesture: GestureChoice = fingerCount == 1 ? .oneFingerDrag
+            : (fingerCount == 2 ? .twoFingerDrag : .tapToDrag)
+        let item = createGestureMenu(title: "\(fingerCount)-finger Tap to Drag", gesture: gesture,
+                                     enabled: settings.tapToDragEnabled, button: settings.tapToDragButton,
+                                     action: fingerCount == 3 ? #selector(toggleTapToDrag)
+                                         : #selector(toggleLowFingerGesture(_:)),
+                                     tag: fingerCount == 3 ? .tapToDrag : nil)
+        item.submenu?.items.first?.representedObject = gesture
         item.submenu?.addItem(.separator())
         let timeout = NSMenuItem(
-            title: "Timeout (\(Int((preferences.tapToDragTimeout * 1000).rounded())) ms)",
+            title: "Timeout (\(Int((settings.tapToDragTimeout * 1000).rounded())) ms)",
             action: nil, keyEquivalent: "")
         let choices = NSMenu()
         for milliseconds in [100, 150, 200, 250, 300, 500, 1000] {
             let choice = createMenuItem(title: "\(milliseconds) ms",
                                         action: #selector(setTapToDragTimeout(_:)))
-            choice.representedObject = Double(milliseconds) / 1000
-            choice.state = abs(preferences.tapToDragTimeout * 1000 - Double(milliseconds)) < 0.5 ? .on : .off
+            choice.representedObject = TimeoutSelection(fingerCount: fingerCount, seconds: Double(milliseconds) / 1000)
+            choice.state = abs(settings.tapToDragTimeout * 1000 - Double(milliseconds)) < 0.5 ? .on : .off
             choices.addItem(choice)
         }
         choices.addItem(.separator())
-        choices.addItem(createMenuItem(title: "Custom…", action: #selector(setCustomTapToDragTimeout)))
+        let custom = createMenuItem(title: "Custom…", action: #selector(setCustomTapToDragTimeout(_:)))
+        custom.representedObject = fingerCount
+        choices.addItem(custom)
         timeout.submenu = choices
         item.submenu?.addItem(timeout)
         let immediatePress = createMenuItem(title: "Press Button on First Tap Release",
-                                            action: #selector(toggleTapToDragImmediatePress))
-        immediatePress.state = preferences.tapToDragImmediatePress ? .on : .off
+                                            action: #selector(toggleTapToDragImmediatePress(_:)))
+        immediatePress.representedObject = fingerCount
+        immediatePress.state = settings.tapToDragImmediatePress ? .on : .off
         item.submenu?.addItem(immediatePress)
         let explanation = NSMenuItem(title: "Early press requires matching tap and drag buttons",
                                       action: nil, keyEquivalent: "")
@@ -626,6 +663,8 @@ public class MenuBarController: NSObject {
         config.tapToDragButton = preferences.tapToDragButton
         config.tapToDragTimeout = preferences.tapToDragTimeout
         config.tapToDragImmediatePress = preferences.tapToDragImmediatePress
+        config.oneFingerTaps = preferences.oneFingerTaps
+        config.twoFingerTaps = preferences.twoFingerTaps
         multitouchManager?.updateConfiguration(config)
         buildMenu()
         NotificationCenter.default.post(name: .preferencesChanged, object: preferences)
@@ -646,8 +685,24 @@ public class MenuBarController: NSObject {
         applyGesturePreferences()
     }
 
-    @objc private func toggleTapToDragImmediatePress() {
-        preferences.tapToDragImmediatePress.toggle()
+    private func modifyLowFingerSettings(_ fingerCount: Int, _ update: (inout FingerTapConfiguration) -> Void) {
+        if fingerCount == 1 { update(&preferences.oneFingerTaps) }
+        else { update(&preferences.twoFingerTaps) }
+    }
+
+    @objc private func toggleLowFingerGesture(_ sender: NSMenuItem) {
+        guard let gesture = sender.representedObject as? GestureChoice else { return }
+        modifyLowFingerSettings(gesture.fingerCount) {
+            if gesture.isTap { $0.tapToClickEnabled.toggle() }
+            else { $0.tapToDragEnabled.toggle() }
+        }
+        applyGesturePreferences()
+    }
+
+    @objc private func toggleTapToDragImmediatePress(_ sender: NSMenuItem) {
+        guard let fingerCount = sender.representedObject as? Int else { return }
+        if fingerCount == 3 { preferences.tapToDragImmediatePress.toggle() }
+        else { modifyLowFingerSettings(fingerCount) { $0.tapToDragImmediatePress.toggle() } }
         applyGesturePreferences()
     }
 
@@ -657,23 +712,35 @@ public class MenuBarController: NSObject {
         case .tap: preferences.tapButton = selection.button
         case .directDrag: preferences.directDragButton = selection.button
         case .tapToDrag: preferences.tapToDragButton = selection.button
+        case .oneFingerTap, .oneFingerDrag, .twoFingerTap, .twoFingerDrag:
+            modifyLowFingerSettings(selection.gesture.fingerCount) {
+                if selection.gesture.isTap { $0.tapButton = selection.button }
+                else { $0.tapToDragButton = selection.button }
+            }
         }
         applyGesturePreferences()
     }
 
     @objc private func setTapToDragTimeout(_ sender: NSMenuItem) {
-        guard let seconds = sender.representedObject as? Double else { return }
-        preferences.tapToDragTimeout = seconds
+        guard let selection = sender.representedObject as? TimeoutSelection else { return }
+        setTapToDragTimeout(selection.seconds, fingerCount: selection.fingerCount)
         applyGesturePreferences()
     }
 
-    @objc private func setCustomTapToDragTimeout() {
+    private func setTapToDragTimeout(_ seconds: Double, fingerCount: Int) {
+        if fingerCount == 3 { preferences.tapToDragTimeout = seconds }
+        else { modifyLowFingerSettings(fingerCount) { $0.tapToDragTimeout = seconds } }
+    }
+
+    @objc private func setCustomTapToDragTimeout(_ sender: NSMenuItem) {
+        guard let fingerCount = sender.representedObject as? Int else { return }
+        let settings = preferences.gestureConfig.tapConfiguration(for: fingerCount)
         let alert = NSAlert()
-        alert.messageText = "Tap to Drag Timeout"
-        alert.informativeText = "Time from releasing a three-finger tap to the next three-finger contact (1–60000 milliseconds)."
+        alert.messageText = "\(fingerCount)-finger Tap to Drag Timeout"
+        alert.informativeText = "Time from releasing a \(fingerCount)-finger tap to the next matching contact (1–60000 milliseconds)."
         alert.addButton(withTitle: "Save")
         alert.addButton(withTitle: "Cancel")
-        let input = NSTextField(string: String(Int((preferences.tapToDragTimeout * 1000).rounded())))
+        let input = NSTextField(string: String(Int((settings.tapToDragTimeout * 1000).rounded())))
         input.frame = NSRect(x: 0, y: 0, width: 200, height: 24)
         alert.accessoryView = input
         alert.window.initialFirstResponder = input
@@ -684,7 +751,7 @@ public class MenuBarController: NSObject {
                 alert.informativeText = "Enter a number between 1 and 60000 milliseconds."
                 continue
             }
-            preferences.tapToDragTimeout = milliseconds / 1000
+            setTapToDragTimeout(milliseconds / 1000, fingerCount: fingerCount)
             applyGesturePreferences()
             return
         }

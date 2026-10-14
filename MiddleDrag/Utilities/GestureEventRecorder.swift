@@ -98,5 +98,13 @@ final class GestureEventRecorder: @unchecked Sendable {
                + "ignore_desktop=\(config.ignoreDesktop) window_filter=\(config.minimumWindowSizeFilterEnabled) "
                + "min_window=\(config.minimumWindowWidth)x\(config.minimumWindowHeight) title_bar_passthrough=\(config.passThroughTitleBar) "
                + "sensitivity=\(config.sensitivity) smoothing=\(config.smoothingFactor)")
+        for fingerCount in [1, 2] {
+            let settings = config.tapConfiguration(for: fingerCount)
+            record("configuration.low_finger",
+                "fingers=\(fingerCount) tap_enabled=\(settings.tapToClickEnabled) tap_button=\(settings.tapButton.rawValue) "
+                + "tap_to_drag_enabled=\(settings.tapToDragEnabled) tap_to_drag_button=\(settings.tapToDragButton.rawValue) "
+                + "timeout=\(settings.tapToDragTimeout) immediate_press_enabled=\(settings.tapToDragImmediatePress) "
+                + "immediate_press_effective=\(settings.usesImmediatePress) landing_ms=30")
+        }
     }
 }
